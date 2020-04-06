@@ -1,0 +1,613 @@
+---
+title: "Markov Chain Monte Carlo for Bayesian Inference"
+author: "Ben Goodrich"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+autosize: true
+header-includes:
+   - \usepackage{amsmath}
+   - \usepackage{amssymb}
+   - \usepackage{color}
+output:
+  ioslides_presentation:
+    widescreen: yes
+editor_options: 
+  chunk_output_type: console
+params:
+  class: FALSE
+---
+<style type="text/css">
+slides > slide:not(.nobackground):after {
+  content: '';
+}
+</style>
+
+```{r setup, include=FALSE}
+options(width = 90)
+library(knitr)
+library(rgl)
+knit_hooks$set(rgl = hook_plot_custom)
+knit_hooks$set(small.mar = function(before, options, envir) {
+    if (before) par(mar = c(4, 4, .1, .1), las = 1)  # smaller margin on top and right
+})
+```
+
+## Standard Normal to General Normal
+
+- PDF of the standard normal distribution is $f\left(z\right) = \frac{1}{\sqrt{2\pi}} e^{-\frac{1}{2}z^2}$
+
+> - If $Z$ is distributed standard normal and $\sigma > 0$, what is the distribution of 
+  $X\left(Z\right) = \mu + \sigma Z$?
+> - $\Pr\left(Z \leq z\right) = \Pr\left(Z \leq z\left(x\right)\right)$
+> - $z\left(x\right) = \frac{x - \mu}{\sigma}$ whose derivative is 
+  $\frac{\partial}{\partial x} z\left(x\right) = \frac{1}{\sigma}$
+> - $f\left(x \mid \mu, \sigma\right) = \frac{\partial}{\partial x} \Pr\left(Z \leq z\left(x\right)\right)
+  = f\left(z\left(x\right)\right) \times \frac{\partial}{\partial x}z\left(x\right)
+  = \frac{1}{\sigma \sqrt{2\pi}} e^{-\frac{1}{2}\left(\frac{x - \mu}{\sigma}\right)^2}$
+which is the PDF for a general normal distribution
+> - $\mathbb{E}X = \mu + \sigma \mathbb{E}Z = \mu$
+> - $\mathbb{E}\left(X - \mu\right)^2 = \mathbb{E}\left(\sigma Z\right)^2 = \sigma^2 \mathbb{E}Z^2 = \sigma^2$
+
+## General Normal to Lognormal
+
+- If $X$ is distributed normal with expectation $\mu$ and standard deviation $\sigma > 0$, what is the
+  PDF of $Y\left(X\right) = e^{X}$?
+
+> - $\Pr\left(X \leq x\right) = \Pr\left(X \leq x\left(y\right)\right)$
+> - $x\left(y\right) = \ln y$ whose derivative is $\frac{\partial}{\partial y}x\left(y\right) = \frac{1}{y}$
+> - $f\left(y \mid \mu, \sigma\right) = f\left(x\left(y\right) \mid \mu, \sigma\right) \times
+  \frac{\partial}{\partial y}x\left(y\right) 
+  = \frac{1}{y \sigma \sqrt{2\pi}} e^{-\frac{1}{2}\left(\frac{\ln y - \mu}{\sigma}\right)^2}$
+which is the PDF of the lognormal distribution
+> - $\mathbb{E}Y = \int_0^\infty e^y f\left(y \mid \mu, \sigma\right) dy = e^{\mu + \frac{\sigma^2}{2}} \neq \mu$
+
+## Poisson Likelihood with Lognormal Prior
+
+> - Taking limits, we can express Bayes' Rule for continuous random variables with Probability
+  Density Functions (PDFs)
+$$f\left(B\mid A\right) = \frac{f\left(B\right) f\left(A \mid B\right)}{f\left(A\right)}$$
+> - The PDF of the lognormal distribution is again
+$$\color{red}{f\left(\lambda \mid \mu,\sigma\right) = \frac{1}{\lambda \sigma \sqrt{2 \pi}}
+  e^{-\frac{1}{2}\left(\frac{\ln y - \mu}{\sigma}\right)^2}}$$
+> - Poisson PMF for $N$ observations with sum $s$ is
+$\color{blue}{f\left(\left.y_1,\dots,y_n\right|\lambda\right) =  \frac{\lambda^{s} e^{-N\lambda}}{s!}}$
+> - Bayes' Rule is
+$\color{purple}{f\left(\lambda \mid \mu, \sigma, y_1,\dots,y_n\right) \propto k\left(\lambda\right) = }
+\color{purple}{\lambda^{s - 1} e^{-N\lambda - \frac{1}{2}\left(\frac{\ln \lambda - \mu}{\sigma}\right)^2}}$
+> - The denominator of Bayes' Rule is $\int_0^\infty k\left(\lambda\right) d\lambda$ but is not elementary
+
+## Posterior PDF
+
+In breakout rooms, one person screenshare and the rest help to write a R function that evaluates
+the above posterior PDF:
+
+1. Choose arbitrary real values of $\mu$ and $\sigma > 0$ integers $s \geq 0$ and $N > 0$
+2. Write / wrap a function of $\lambda$ that evaluates the lognormal prior PDF
+3. Write / wrap a function of $\lambda$ that evaluates the Poisson likelihood at $N \lambda$
+4. Write a function of $\lambda$ that multiplies the prior and likelihood together
+5. Call the `integrate` function on the function from (4) to compute the denominator of Bayes' Rule
+6. Write a function of $\lambda$ that calls the function from (4) and divides by the constant from (5)
+
+## R Code for Previous Example
+
+```{r, small.mar = TRUE, warning = FALSE, fig.keep = "none", include = !params$class}
+mu <- 0
+sigma <- sqrt(2)
+s <- 42
+N <- 5
+prior <- function(lambda) dlnorm(lambda, meanlog = mu, sdlog = sigma)
+likelihood <- function(lambda) dpois(s, N * lambda) # note: function of lambda
+kernel <- function(lambda) prior(lambda) * likelihood(lambda)
+denom <- integrate(kernel, lower = 0, upper = Inf)$value # 0.0022
+post <- function(lambda) kernel(lambda) / denom
+curve(post(lambda), from = 0, to = 15, xname = "lambda",
+      xlab = expression(lambda), ylab = "Posterior PDF")
+```
+
+## Plot from Previous Slide
+
+```{r, echo = FALSE, small.mar = TRUE, warning = FALSE, fig.width=10, fig.height = 5}
+curve(post(lambda), from = 0, to = 15, xname = "lambda",
+      xlab = expression(lambda), ylab = "Posterior PDF")
+```
+
+
+## Drawing from a Uniform Distribution
+
+* Randomness can be harvested from physical sources, but it is expensive
+* Modern Intel processors have a (possibly) [true random-number generator](https://en.wikipedia.org/wiki/RdRand)
+* In practice, software emulates a true random-number generator for speed
+* Let $M = -1 + 2^{64} = 18,446,744,073,709,551,615$ be the largest unsigned integer that a 64-bit
+  computer can represent. You can essentially draw uniformally from $\Omega_U = \left[0,1\right)$ by
+    1. Drawing $\tilde{y}$ from $\Omega_Y = \{0,1,\dots,M\}$ with each probability $\frac{1.0}{M}$
+    2. Letting $\tilde{u} = \frac{\tilde{y}}{1.0 + M}$, which casts to a double-precision denominator
+* The CDF of the uniform distribution on $\left(a,b\right)$ is 
+  $F\left(\left.u\right|a,b\right) = \frac{u - a}{b - a}$ and the PDF is 
+  $f\left(\left.u\right|a,b\right) = \frac{1}{b - a}$. Standard is a special case with $a = 0$ and $b = 1$.
+
+## Drawing from an Exponential Distribution {.build}
+
+```{r, echo = FALSE, small.mar = TRUE, fig.height=3, fig.width=9}
+curve(pexp(x), from = 0, to = 5, ylab = "F(x) = 1 - e^x")
+```
+
+- To draw from this (standard exponential) distribution (a la `rexp`), you could
+    1. Draw $\tilde{u}$ from a standard uniform distribution
+    2. Find the point on the curve with height $\tilde{u}$
+    3. Drop to the horizontal axis at $\tilde{x}$ to get a standard exponential realization
+    4. Optionally scale $\tilde{x}$ by a given $\mu > 0$ to make it exponential with rate $\frac{1}{\mu}$
+    
+## Inverse CDF Sampling of Continuous RVs
+    
+- In principle, the previous implies an algorithm to draw from ANY univariate continuous distribution
+
+> - If $U$ is distributed standard uniform, what is the PDF of $X = F^{-1}\left(U\right)$?
+> - $\Pr\left(U \leq u\right) = u = \Pr\left(U \leq u\left(x\right)\right)$
+> - $u\left(x\right) = F\left(x \mid \boldsymbol{\theta}\right)$ with derivative
+  $f\left(x \mid \boldsymbol{\theta}\right)$
+> - So the PDF of $X$ is $1 \times f\left(x \mid \boldsymbol{\theta}\right)$
+> - `rnorm(1, mu, sigma)` is implemented by `qnorm(runif(1), mu, sigma)`
+
+## Generalized $\lambda$ Distribution (GLD) {.smaller}
+
+- GLD is a four parameter (i.e. very flexible) continuous distribution 
+  [defined](https://mpra.ub.uni-muenchen.de/43333/3/MPRA_paper_43333.pdf) by its inverse CDF
+  $$F^{-1}\left(u \mid m, r, a, s\right) = m + r \times F^{-1}\left(u \mid a, s\right) = 
+  m + r \times \frac{S\left(u \mid a, s\right) - S\left(\frac{1}{2} \mid a, s\right)}
+  {S\left(\frac{3}{4} \mid a, s\right) - S\left(\frac{1}{4} \mid a, s\right)}$$
+where $m$ is the median, $r$ is the inter-quartile range, $a \in \left(-1, 1\right)$ is
+an asymmetry parameter, $s \in \left(0,1\right)$ is a tail steepness parameter, and 
+$S\left(u \mid a, s\right)$ is a complicated increasing function
+
+- The CDF and PDF of the GLD do not have explicit forms, which is not a problem for us
+```{r}
+rstan::expose_stan_functions("quantile_functions.stan") # defines GLD_icdf() and GLD_rng() in R
+source("GLD_helpers.R")                                 # brings into R GLD_solver() and GLD_solver_bounded()
+args(GLD_solver); args(GLD_solver_bounded)              # these two functions solve for a and s
+```
+
+## Using the Generalized $\lambda$ Distribution
+
+- In $2018$, the $20\%$ percentile of household income was \$25,600. The median was
+  \$63,179, and the $80\%$ percentile was \$130,000.
+```{r, fig.keep="none"}
+a_s <- GLD_solver(lower_quartile = log(28), median = log(63.179), upper_quartile = log(125), 
+                  other_quantile = 0, alpha = 0) # note warning
+Q <- Vectorize(GLD_icdf, vectorize.args = "p")
+curve(exp(Q(u, median = log(63.179), IQR = log(125) - log(28), 
+            asymmetry = a_s[1], steepness = a_s[2])),
+      from = 0, to = 1, xname = "u", xlab = "Income quantile", ylab = "Income", log = "y")
+```
+
+## Plot from Previous Slide
+
+```{r, echo = FALSE, fig.height=5, fig.width=10, small.mar = TRUE}
+curve(exp(Q(u, median = log(63.179), IQR = log(125) - log(28), 
+            asymmetry = a_s[1], steepness = a_s[2])), n = 10001,
+      from = 0, to = 1, xname = "u", xlab = "Income quantile", ylab = "Income", log = "y")
+
+segments(x0 = 0.25, y0 = 1,  y1 = 28,   col = 2, lty = 2)
+segments(x0 = 0.25, y0 = 28, x1 = 1.25, col = 2, lty = 2)
+text(x = 1, y = 28, labels = 28, pos = 3, col = 2)
+
+segments(x0 = 0.5, y0 = 1, y1 = 63.179, col = 2, lty = 2)
+segments(x0 = 0.5, y0 = 63.179, x1 = 1.25, col = 2, lty = 2)
+text(x = 1, y = 63.179, labels = 63.179, pos = 3, col = 2)
+
+segments(x0 = 0.75, y0 = 1, y1 = 125, col = 2, lty = 2)
+segments(x0 = 0.75, y0 = 125, x1 = 1.25, col = 2, lty = 2)
+text(x = 1, y = 125, labels = 125, pos = 3, col = 2)
+```
+
+## Using the Bounded Generalized $\lambda$ Distribution {.build}
+
+- What do you think the probability that someone from around NYU who is tested for
+  coronavirus will be positive? What is your prior median and IQR?
+
+```{r, warning = FALSE, fig.width=10, fig.height=3, small.mar = TRUE, include = !params$class}
+a_s <- GLD_solver_bounded(bounds = 0:1, median = 0.3, IQR = 0.1) # warnings are OK
+curve(Q(u, median = 0.3, IQR = 0.1, a_s[1], a_s[2]), from = 0, to = 1, ylim = c(0, 0.5),
+      xname = "u", xlab = "Cumulative Probability", ylab = "Probability of a Positive Test")
+```
+
+## Prior Predictive Distribution {.build}
+
+- The prior predictive distribution, which is the marginal distribution of
+  future data integrated over the parameters, is formed by
+
+    1. Draw $\widetilde{\theta}$ from its prior distribution
+    2. Draw $\widetilde{y}$ from its conditional distribution given the
+      realization of $\widetilde{\theta}$
+    3. Store the realization of $\widetilde{y}$
+
+```{r, include = !params$class}
+theta <- Q(runif(4000), median = 0.3, IQR = 0.1, a_s[1], a_s[2])
+y <- rbinom(n = length(theta), size = 226, prob = theta)
+summary(y)
+```
+
+- If you prior on $\theta$ is plausible, prior predictive distribution
+  should be plausible
+
+## Prior Predictive Distribution Matching {.build}
+
+- When the outcome is a small-ish count, a good algorithm to draw $S$
+  times from the posterior distribution is to keep the realization
+  of $\widetilde{\theta}$ if and only if the realization of
+  $\widetilde{y}$ exactly matches the observed $y$
+```{r, include = !params$class}
+y <- 85; n <- 226 # according to https://github.com/nychealth/coronavirus-data for 10012
+theta <- rep(NA_real_, 4000); s <- 1
+while (s <= length(theta)) {
+  theta_ <- GLD_rng(median = 0.3, IQR = 0.1, asymmetry = a_s[1], steepness = a_s[2])
+  y_ <- rbinom(1, size = n, prob = theta_)
+  if (y_ == y) {
+    theta[s] <- theta_
+    s <- s + 1
+  } # else do nothing
+}
+summary(theta) # posterior quantiles (and min / mean / max)
+```
+  
+
+## Bivariate Normal Distribution
+
+The PDF of the bivariate normal distribution over $\Omega = \mathbb{R}^2$ is
+$$f\left(\left.x,y\right|\mu_X,\mu_Y,\sigma_X,\sigma_Y,\rho\right) = \\
+\frac{1}{2\pi\sigma_X\sigma_Y\sqrt{1-\rho^2}}e^{-\frac{1}{2\left(1-\rho^2\right)}
+\left(\left(\frac{x - \mu_X}{\sigma_X}\right)^2 + 
+\left(\frac{y - \mu_Y}{\sigma_Y}\right)^2 - 
+2\rho\frac{x - \mu_X}{\sigma_X}\frac{y - \mu_Y}{\sigma_Y}\right)} = \\
+\frac{1}{\sigma_X\sqrt{2\pi}}e^{-\frac{1}{2}\left(\frac{x - \mu_X}{\sigma_X}\right)^2} \times
+\frac{1}{\color{blue}{\sigma}\sqrt{2\pi}}e^{-\frac{1}{2}
+\left(\frac{y - \color{red}{\left(\mu_y + \beta\left(x-\mu_X\right)\right)}}
+{\color{blue}{\sigma}}\right)^2},$$ where $X$ is MARGINALLY normal and $\left.Y\right|X$
+is CONDITIONALLY normal with expectation $\color{red}{\mu_Y + \beta\left(x-\mu_X\right)}$ 
+and standard deviation $\color{blue}{\sigma = \sigma_Y\sqrt{1-\rho^2}}$, where 
+$\color{red}{\beta = \rho\frac{\sigma_Y}{\sigma_X}}$ is the OLS coefficient when $Y$ is regressed on $X$
+and $\sigma$ is the error standard deviation. We can thus draw $\tilde{x}$ and then 
+condition on it to draw $\tilde{y}$.
+
+## Drawing from the Bivariate Normal Distribution
+
+```{r, echo = FALSE, comment = ""}
+writeLines(readLines("binormal_rng.stan"))
+```
+```{r, independent, cache=TRUE}
+rstan::expose_stan_functions("binormal_rng.stan")
+S <- 1000; mu_X <- 0; mu_Y <- 0; sigma_X <- 1; sigma_Y <- 1; rho <- 0.75
+indep <- replicate(26, colMeans(binormal_rng(S = 100, mu_X, mu_Y, sigma_X, sigma_Y, rho)))
+rownames(indep) <- c("x", "y"); colnames(indep) <- letters
+```
+
+## Bivariate Normal Log-PDF
+
+In breakout rooms, one person screenshare and collectively fill in a function like this
+to evaluate the logarithm of the bivariate normal PDF from two slides ago:
+
+```{stan output.var="binormal_lpdf", eval = FALSE}
+functions {
+  real binormal_lpdf(row_vector xy, 
+                     real mu_X, real mu_Y, real sigma_X, real sigma_Y, real rho) {
+    // calculate intermediate constants
+    // add two calls to normal_lpdf() which is like R's dnorm(..., log = TRUE)
+    // but the first argument to normal_lpdf() is separated by a | from the other two
+    // return their sum
+  }
+}
+```
+
+## Markov Processes
+
+* A Markov process is a sequence of random variables with a particular dependence
+  structure where the future is conditionally independent of the past given the present,
+  but nothing is marginally independent of anything else
+* An AR1 model is a linear Markov process
+* Let $X_s$ have conditional PDF $f_s\left(\left.X_s\right|X_{s - 1}\right)$. Their
+  joint PDF is
+  $$f\left(X_0, X_1, \dots, X_{S - 1}, X_S\right) = 
+  f_0\left(X_0\right) \prod_{s = 1}^S f_s\left(\left.X_s\right|X_{s - 1}\right)$$
+* Can we construct a Markov process such that the marginal distribution of $X_S$
+  is a given target distribution as $S\uparrow \infty$?
+* If so, they you can get a random draw --- or a set of dependent draws --- from 
+  the target distribution by letting that Markov process run for a long time
+* Basic idea is that you can marginalize by going through a lot of conditionals  
+
+## Metropolis-Hastings Markov Chain Monte Carlo
+
+* Suppose you want to draw from some distribution whose PDF is 
+$f\left(\left.\boldsymbol{\theta}\right|\dots\right)$
+but do not have a customized algorithm to do so. 
+* Initialize $\boldsymbol{\theta}$ to some value in $\Theta$ and then repeat $S$ times:
+
+    1. Draw a proposal for $\boldsymbol{\theta}$, say $\boldsymbol{\theta}^\prime$, from
+      a distribution whose PDF is $q\left(\left.\boldsymbol{\theta}^\prime\right|\dots\right)$
+    2. Let 
+    $\alpha^\ast = \mathrm{min}\{1,\frac{f\left(\left.\boldsymbol{\theta}^\prime\right|\dots\right)}
+    {f\left(\left.\boldsymbol{\theta}\right|\dots\right)}
+    \frac{q\left(\left.\boldsymbol{\theta}\right|\dots\right)}
+    {q\left(\left.\boldsymbol{\theta}^\prime\right|\dots\right)}\}$. N.B.: Constants cancel so not needed!
+    3. If $\alpha^\ast$ is greater than a standard uniform variate, set
+    $\boldsymbol{\theta} = \boldsymbol{\theta}^\prime$
+    4. Store $\boldsymbol{\theta}$ as the $s$-th draw
+
+* The $S$ draws of $\boldsymbol{\theta}$ have PDF
+$f\left(\left.\boldsymbol{\theta}\right|\dots\right)$ but are NOT independent
+
+* If $\frac{q\left(\left.\boldsymbol{\theta}\right|\dots\right)}
+           {q\left(\left.\boldsymbol{\theta}^\prime\right|\dots\right)} = 1$, called Metropolis MCMC
+  such as $q\left(\theta \mid a, b\right) = \frac{1}{b - a}$
+
+## Metropolis Example
+
+In breakout rooms, utilize `binormal_lpdf` to write a Stan function to draw $S$ realizations
+of $x$ and $y$ from a bivariate normal distribution using the Metropolis algorithm with a 
+uniform proposal distribution whose bounds are $x,y \mp h$
+```{stan output.var="Metropolis", eval = FALSE}
+functions {
+  real binormal_lpdf(row_vector xy, 
+                     real mu_X, real mu_Y, real sigma_X, real sigma_Y, real rho) {
+    // copy this from above
+  }
+  
+  matrix Metropolis_rng(int S, real h, 
+                        real mu_X, real mu_Y, real sigma_X, real sigma_Y, real rho) {
+    matrix[S, 2] draws; real x = 0; real y = 0; // must initialize these before the loop
+    for (s in 1:S) {
+      // fill in draws[s,] by calling exp(binormal_lpdf(...)) to evaluate alpha*
+    }
+    return draws;
+  }
+}
+```
+```{r}
+rstan::expose_stan_functions("Metropolis_rng.stan")
+```
+
+## Efficiency in Estimating $\mathbb{E}X$ & $\mathbb{E}Y$ w/ Metropolis
+
+```{r}
+means <- replicate(26, colMeans(Metropolis_rng(S, 2.75, mu_X, mu_Y, sigma_X, sigma_Y, rho)))
+rownames(means) <- c("x", "y"); colnames(means) <- LETTERS; round(means, digits = 3)
+round(indep, digits = 3) # note S was 100, rather than 1000
+```
+
+## Autocorrelation of Metropolis MCMC
+
+```{r, eval = TRUE, fig.height=4.25, fig.width=9, small.mar = TRUE}
+xy <- Metropolis_rng(S, 2.75, mu_X, mu_Y, sigma_X, sigma_Y, rho); nrow(unique(xy))
+colnames(xy) <- c("x", "y"); plot(as.ts(xy), main = "")
+```
+
+## Effective Sample Size of Markov Chain Output
+
+* If a Markov Chain mixes fast enough for the MCMC CLT to hold, then
+
+    * The Effective Sample Size is $n_{eff} = \frac{S}{1 + 2\sum_{k=1}^\infty \rho_k}$, where $\rho_k$ is the
+      ex ante autocorrelation between two draws that are $k$ iterations apart
+    * The MCMC Standard Error of the mean of the $S$ draws is $\frac{\sigma}{\sqrt{n_{eff}}}$ where $\sigma$ 
+      is the true posterio standard deviation
+
+* If $\rho_k = 0 \forall k$, then $n_{eff} = S$ and the MCMC-SE is $\frac{\sigma}{\sqrt{S}}$, so the
+Effective Sample Size is the number of INDEPENDENT draws that would be expected to estimate the posterior mean 
+of some function with the same accuracy as the $S$ DEPENDENT draws that you have from the posterior distribution
+
+* Both have to be estimated and unfortunately, the estimator is not that reliable when the true 
+  Effective Sample Size is low (~5% of $S$)
+* For the Metropolis example, $n_{eff}$ is estimated to be $\approx 100$ for both margins
+
+## Gibbs Samplers
+
+* Metropolis-Hastings where $q\left(\left.\theta_k^\prime\right|\dots\right) =
+  f\left(\left.\theta_k^\prime\right|\boldsymbol{\theta}_{-k}\dots\right)$
+  and $\boldsymbol{\theta}_{-k}$ consists of all elements of
+  $\boldsymbol{\theta}$ except the $k$-th
+* $\alpha^\ast =
+  \mathrm{min}\{1,\frac{f\left(\left.\boldsymbol{\theta}^\prime\right|\dots\right)}
+    {f\left(\left.\boldsymbol{\theta}\right|\dots\right)}
+    \frac{f\left(\left.\theta_k\right|\boldsymbol{\theta}_{-k}\dots\right)}
+    {f\left(\left.\theta_k^\prime\right|\boldsymbol{\theta}_{-k}\dots\right)}\} =
+  \mathrm{min}\{1,\frac{f\left(\left.\theta_k^\prime\right|\boldsymbol{\theta}_{-k}\dots\right)
+    f\left(\left.\boldsymbol{\theta}_{-k}\right|\dots\right)}
+    {f\left(\left.\theta_k\right|\boldsymbol{\theta}_{-k}\dots\right)
+     f\left(\left.\boldsymbol{\theta}_{-k}\right|\dots\right)}
+    \frac{f\left(\left.\theta_k\right|\boldsymbol{\theta}_{-k}\dots\right)}
+    {f\left(\left.\theta_k^\prime\right|\boldsymbol{\theta}_{-k}\dots\right)}\} = 1$
+  so $\theta_k^\prime$ is ALWAYS accepted by construction. But $\theta_k^\prime$ may be very 
+  close to $\theta_k$ when the variance of the "full-conditional" distribution of 
+  $\theta_k^\prime$ given $\boldsymbol{\theta}_{-k}$ is small
+* Can loop over $k$ to draw sequentially from each full-conditional distribution  
+* Presumes that there is an algorithm to draw from the full-conditional distribution
+  for each $k$. Most times have to fall back to something else.
+
+## Gibbs Sampling from the Bivariate Normal
+
+In breakout rooms, write a `Gibbs_rng` function in the Stan language that draws
+$S$ times from a bivariate normal distribution by repeatedly drawing from the
+normal distribution of $Y \mid X$ and then the normal distribution of $X \mid Y$
+
+```{stan output.var="Gibbs_rng", eval = FALSE}
+functions { /* saved as Gibbs_rng.stan in R's working directory */
+  matrix Gibbs_rng(int S, real mu_X, real mu_Y, real sigma_X, real sigma_Y, real rho) {
+    matrix[S, 2] draws; real x = 0; // must initialize before loop so that it persists
+    // define many constants
+    for (s in 1:S) {
+      // fill in this part
+    }
+  }
+}
+```
+
+
+## Answer
+
+```{r, echo = FALSE, comment = "", include = !params$class}
+cat(readLines("Gibbs_rng.stan"), sep = "\n")
+```
+```{r}
+rstan::expose_stan_functions("Gibbs_rng.stan")
+```
+
+## Autocorrelation of Gibbs Sampling: $n_{eff} \approx 300$
+
+```{r, fig.width=9, fig.height=4.5, small.mar = TRUE}
+xy <- Gibbs_rng(S, mu_X, mu_Y, sigma_X, sigma_Y, rho)
+colnames(xy) <- c("x", "y")
+plot(as.ts(xy), main = "")
+```
+
+## What the BUGS Software Family Essentially Does
+
+```{r}
+library(Runuran) # defines ur() which draws from the approximate ICDF via pinv.new()
+BUGSish <- function(log_kernel, # function of theta outputting posterior log-kernel
+                    theta,      # starting values for all the parameters
+                    ...,        # additional arguments passed to log_kernel
+                    LB = rep(-Inf, K), UB = rep(Inf, K), # optional bounds on theta
+                    S = 1000) { # number of posterior draws to obtain
+  K <- length(theta); draws <- matrix(NA, nrow = S, ncol = K)
+  for(s in 1:S) { # these loops are slow, as is approximating the ICDF | theta[-k]
+    for (k in 1:K) {
+      full_conditional <- function(theta_k) 
+        return(log_kernel(c(head(theta, k - 1), theta_k, tail(theta, K - k)), ...))
+      theta[k] <- ur(pinv.new(full_conditional, lb = LB[k], ub = UB[k], islog = TRUE,
+                              uresolution = 1e-8, smooth = TRUE, center = theta[k]))
+    }
+    draws[s, ] <- theta
+  }
+  return(draws)
+}
+```
+
+## Gibbs Sampling a la BUGS
+
+```{r, BUGS, cache = TRUE, small.mar = TRUE}
+rstan::expose_stan_functions("binormal_lpdf.stan")
+xy <- BUGSish(binormal_lpdf, theta = c(0, 0),
+              mu_X, mu_Y, sigma_X, sigma_Y, rho)
+colnames(xy) <- c("x", "y")
+plot(as.ts(xy), main = "")
+```
+
+## Comparing Stan to Historical MCMC Samplers
+
+* Only requires user to specify numerator of Bayes Rule
+* Unlike Gibbs sampling, proposals are joint
+* Like Gibbs sampling, proposals always accepted
+* Like Gibbs sampling, tuning of proposals is (often) not required
+* Unlike Gibbs sampling, the effective sample size is typically
+  25% to 125% of the nominal number of draws from the posterior distribution
+  because $\rho_1$ can be negative in 
+  $n_{eff} = \frac{S}{1 + 2\sum_{k=1}^\infty \rho_k}$
+* Unlike Gibbs sampling, Stan produces warning messages when
+  things are not going swimmingly. Do not ignore these!
+* Unlike BUGS, Stan does not permit discrete unknowns but even BUGS has difficulty
+  drawing discrete unknowns with a sufficient amount of efficiency 
+* Metropolis-Hastings is another historical MCMC sampler that you may have heard
+  about and Stan is always better than M-H
+
+## Hamiltonian Monte Carlo
+
+* Instead of simply drawing from the posterior distribution whose PDF is
+  $f\left(\left.\boldsymbol{\theta}\right|\mathbf{y}\dots\right) \propto
+   f\left(\boldsymbol{\theta}\right) L\left(\boldsymbol{\theta};\mathbf{y}\right)$
+  Stan augments the "position" variables $\boldsymbol{\theta}$ with an
+  equivalent number of "momentum" variables $\boldsymbol{\phi}$ and draws from
+  $$f\left(\left.\boldsymbol{\theta}\right|\mathbf{y}\dots\right) \propto
+    \int_{-\infty}^{\infty} \dots \int_{-\infty}^{\infty} \prod_{k=1}^K
+    \frac{1}{\sigma_k\sqrt{2\pi}}e^{-\frac{1}{2}\left(\frac{\phi_k}{\sigma_k}\right)^2}
+    f\left(\boldsymbol{\theta}\right) L\left(\boldsymbol{\theta};\mathbf{y}\right)
+    d\phi_1 \dots d\phi_K$$
+* Since the likelihood is NOT a function of $\phi_k$, the posterior distribution
+  of $\phi_k$ is the same as its prior, which is normal with a "tuned" standard deviation. 
+  So, at the $s$-th MCMC iteration, we just draw each $\widetilde{\phi}_k$ from its normal distribution.
+* Using physics, the realizations of each $\widetilde{\phi}_k$ at iteration $s$ "push" 
+  $\boldsymbol{\theta}$ from iteration $s - 1$ through the parameter space whose
+  topology is defined by the negated log-kernel of the posterior distribution:
+  $-\ln f\left(\boldsymbol{\theta}\right) - \ln L\left(\boldsymbol{\theta};\mathbf{y}\right)$
+* See HMC.R demo on Canvas
+
+## Demo of Hamiltonian Monte Carlo
+
+```{r, webgl = TRUE, echo = FALSE, warning = FALSE}
+Rcpp::sourceCpp("gradient.cpp")
+
+# bivariate normal PDF in log form and negated
+dbvn <- function(x, y, mu_X = 0, mu_Y = 0, sigma_X = 1, sigma_Y = 1, rho = 0.75) {
+  return(-apply(cbind(x, y), MARGIN = 1, FUN = binormal_lpdf, mu_X = mu_X,
+                mu_Y = mu_Y, sigma_X = sigma_X, sigma_Y = sigma_Y, rho = rho))
+}
+
+# 3D plot of dbvn. Use mouse to rotate and right-click to zoom in
+persp3d(dbvn, xlim = c(-2,2), ylim = c(-2,2), alpha = 0.5, 
+        xlab = "x", ylab = "y", zlab = "neg-log-density")
+
+# same as dbvn but without vectorization and also returns gradient wrt x and y
+dbvn2 <- function(initial, grad = TRUE, mu_X = 0, mu_Y = 0, sigma_X = 1, sigma_Y = 1, rho = 0.75) {
+  x <- initial[1]; y <- initial[2]
+  out <- binormal_lpdf(c(x, y), mu_X, mu_Y, sigma_X, sigma_Y, rho)
+  if (grad) attributes(out)$grad <- g(x, y, mu_X, mu_Y, sigma_X, sigma_Y, rho)
+  return(out)
+}
+
+# source some of Radford Neal's functions ( http://www.cs.utoronto.ca/~radford/GRIMS.html )
+results <- sapply(c("utilities.r", "mcmc.r", "basic_hmc.r"), FUN = function(x)
+  source(paste0("http://www.cs.toronto.edu/~radford/ftp/GRIMS-2012-06-07/", x)))
+
+set.seed(12345)
+HMC <- basic_hmc(dbvn2, initial = c(x = 0.9, y = 0.2), nsteps = 700, step = .65, return.traj = TRUE)
+pos <- HMC$traj.q
+# starting point
+ID <- points3d(x = pos[1,1], y = pos[1,2], z = dbvn(pos[1,1], pos[1,2]), col = "green", size = 7)
+
+rglwidget() %>%
+playwidget(ageControl(births = 1:nrow(pos),
+                      ages = 1:nrow(pos),
+                      objids = ID,
+                      value = 1,
+                      x = pos[,1], y = pos[,2],
+                      z = apply(pos, 1, FUN = function(xy) dbvn(xy[1], xy[2]))),
+           start = 1, stop = nrow(pos), step = 1, rate = 3, loop = TRUE)
+```
+
+
+## No U-Turn Sampling (NUTS)
+
+* The location of $\boldsymbol{\theta}$ moving according to Hamiltonian physics at any instant
+  would be a valid draw from the posterior distribution
+* But (in the absence of friction) $\boldsymbol{\theta}$ moves indefinitely so when do you 
+  stop?
+* [Hoffman and Gelman (2014)](http://www.stat.columbia.edu/~gelman/research/published/nuts.pdf) proposed 
+  stopping when there is a "U-turn" in the sense the footprints turn around and start to head in 
+  the direction they just came from. Hence, the name No U-Turn Sampling.
+* After the U-Turn, one footprint is selected with probability proportional to the posterior
+  kernel to be the realization of $\boldsymbol{\theta}$ on iteration $s$ and the process
+  repeates itself
+* NUTS discretizes a continuous-time Hamiltonian process in order to solve a system of
+  Ordinary Differential Equations (ODEs), which requires a stepsize that is also tuned
+  during the warmup phase
+* [Video](https://www.youtube.com/watch?time_continue=1&v=qxCQoZC0CVY&feature=emb_logo)
+  and R [code](https://github.com/andrewGhazi/funstuff/blob/master/R/nuts.R)
+
+## Using Stan via R
+
+1. Write the program in a (text) .stan file w/ R-like syntax that ultimately
+defines a posterior log-kernel. We will not do this until May. Stan's parser, 
+`rstan::stanc`, does two things
+    * checks that program is syntactically valid and tells you if not
+    * writes a conceptually equivalent C++ source file to disk
+2. C++ compiler creates a binary file from the C++ source
+3. Execute the binary from R (can be concurrent with 2)
+4. Analyze the resulting samples from the posterior
+    * Posterior predictive checks
+    * Model comparison
+    * Decision
+
+## Drawing from a Posterior Distribution with NUTS
+
+```{r, Stan, cache = TRUE, message = FALSE, warning = FALSE}
+library(rstan)
+post <- stan("coronavirus.stan", refresh = 0,
+             data = list(n = n, y = y, m = 0.3, IQR = 0.1, 
+                         asymmetry = a_s[1], steepness = a_s[2]))
+post
+```

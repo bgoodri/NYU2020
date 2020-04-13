@@ -1,0 +1,553 @@
+---
+title: "Linear Models with the **rstanarm** R Package"
+author: "Ben Goodrich"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+autosize: true
+header-includes:
+   - \usepackage{amsmath}
+   - \usepackage{amssymb}
+   - \usepackage{color}
+output:
+  ioslides_presentation:
+    widescreen: yes
+editor_options: 
+  chunk_output_type: console
+params:
+  class: FALSE
+---
+<style type="text/css">
+slides > slide:not(.nobackground):after {
+  content: '';
+}
+</style>
+
+```{r setup, include=FALSE}
+options(width = 90)
+library(knitr)
+knit_hooks$set(small.mar = function(before, options, envir) {
+    if (before) par(mar = c(4, 4, .1, .1), las = 1)  # smaller margin on top and right
+})
+hook_output <- knit_hooks$get("output")
+knit_hooks$set(output = function(x, options) {
+  lines <- options$output.lines
+  if (is.null(lines)) {
+    return(hook_output(x, options))  # pass to default hook
+  }
+  x <- unlist(strsplit(x, "\n"))
+  more <- "..."
+  if (length(lines)==1) {        # first n lines
+    if (length(x) > lines) {
+      # truncate the output, but add ....
+      x <- c(head(x, lines), more)
+    }
+  } else {
+    x <- c(more, x[lines], more)
+  }
+  # paste these lines together
+  x <- paste(c(x, ""), collapse = "\n")
+  hook_output(x, options)
+})
+options(contrasts = c(unordered = "contr.treatment", ordered = "contr.treatment"))
+library(rstanarm)
+library(ggplot2)
+```
+
+## Difficulty of Analytical Bayesian Inference
+
+- Bayes Rule for an unknown parameter (vector) $\boldsymbol{\theta}$ conditional on known
+data (vector) $\mathbf{y}$ can be written as
+$$f\left(\boldsymbol{\theta} \mid \mathbf{y}\right) = 
+\frac{f\left(\boldsymbol{\theta}\right) f\left(\mathbf{y} \mid \boldsymbol{\theta}\right)}
+{f\left(\mathbf{y}\right)} = 
+\frac{f\left(\boldsymbol{\theta}\right) f\left(\mathbf{y} \mid \boldsymbol{\theta}\right)}
+{\int_{-\infty}^\infty \int_{-\infty}^\infty \dots \int_{-\infty}^\infty 
+f\left(\boldsymbol{\theta}\right) f\left(\mathbf{y} \mid \boldsymbol{\theta}\right)
+d\theta_1 d\theta_2 \dots d\theta_K}$$
+
+>- To obtain the denominator of Bayes Rule, you would need to do an integral
+>- The [Risch Algorithm](https://en.wikipedia.org/wiki/Risch_algorithm) tells you if
+  an integral has an elementary form (rare)
+>- In most cases, we can't write the denominator of Bayes Rule in a useful form
+>- But we can draw from a distribution whose PDF is characterized by the numerator of
+  Bayes Rule without knowing the denominator
+
+## Four Ways to Execute Bayes Rule
+
+1.  Draw from the prior predictive distribution and keep realizations of 
+  the parameters iff the realization of the outcome matches the observed data
+  
+    *  Very intuitive what is happening but is only possible with discrete outcomes 
+    and only feasible with few observations and parameters
+    
+2. Numerically integrate the numerator of Bayes Rule over the parameter(s)
+
+    *  Most similar to what we did in the discrete case but is only feasible when 
+    there are few parameters and can be inaccurate even with only one
+  
+3. Analytically integrate the numerator of Bayes Rule over the parameter(s)
+
+    *  Makes incremental Bayesian learning obvious but is only possible in 
+    simple models when the distribution of the outcome is in the exponential family
+  
+4. Use MCMC to sample from the posterior distribution
+
+    *  Stan works for any posterior PDF that is differentiable w.r.t. the parameters
+
+## Comparing Stan to Ancient MCMC Samplers
+
+* Like M-H, only requires user to specify numerator of Bayes Rule
+* Like M-H but unlike Gibbs sampling, proposals are joint
+* Unlike M-H but like Gibbs sampling, proposals always accepted
+* Unlike M-H but like Gibbs sampling, tuning of proposals is (often) not required
+* Unlike both M-H and Gibbs sampling, the effective sample size is typically
+  25% to 125% of the nominal number of draws from the posterior distribution
+  because $\rho_1$ can be negative in 
+  $n_{eff} = \frac{S}{1 + 2\sum_{k=1}^\infty \rho_k}$
+* Unlike both M-H and Gibbs sampling, Stan produces warning messages when
+  things are not going swimmingly. Do not ignore these!
+* Unlike BUGS, Stan does not permit discrete unknowns but even BUGS has difficulty
+  drawing discrete unknowns with a sufficient amount of efficiency 
+
+## Linear Model
+
+The prior predictive distribution for a linear model proceeds like
+$$\alpha \thicksim ??? \\
+  \boldsymbol{\beta} \thicksim ??? \\
+  \forall n: \mu_n = \alpha + \sum_{k = 1}^K \beta_k x_{nk} \\
+  \sigma \thicksim ??? \\
+  \forall n: \epsilon_n \thicksim \mathcal{N}\left(0, \sigma\right) \\
+  \forall n: y_n = \mu_n + \epsilon_n$$
+where `???` indicates the parameter to the left is drawn from a distribution that is up to you.
+
+## Hibbs Bread Model for Presidential Vote % {.build}
+
+* What is the relationship between growth and incumbent party vote share?
+```{tikz, fig.cap = "Hibbs Model", fig.ext = 'png', echo = FALSE}
+\usetikzlibrary{bayesnet}
+\begin{tikzpicture}[node distance=2cm, auto,>=latex', thick, scale = 0.1]
+
+  % Define nodes
+
+  % Y
+  \node[obs]          (y)   {vote \%}; %
+
+  % X
+  \node[obs, left=5 of y] (x)   {growth}; %
+
+  % conditional mean function
+  \node[det, right=2 of x] (m) {$\mu$} ; %
+
+  % parameters
+  \node[latent, above=0.6 of m]  (a) {$\alpha$} ; %
+  \node[latent, above=0.4 of x]  (b) {$\beta$}  ; %
+  \node[latent, above=0.4 of y]  (s) {$\sigma$} ; %
+  \edge {a,b,x} {m} ; %
+  
+  % Factors
+  \factor[left=of y] {y-f} {below:$\mathcal{N}$} {m,s} {y} ; %
+  \factor[above=of a] {a-f} {left:GLD} {} {a}; %
+  \factor[above=of b] {b-f} {left:GLD} {} {b} ; %
+  \factor[above=of s] {s-f} {right:GLD} {} {s} ; %
+  
+  % Hyperparameters
+  \node[const, right=0.5 of b-f] (q_b) {$\mathbf{q}_\beta$} ; %
+  \edge[-] {q_b} {b-f} ; %
+  \node[const, right=0.5 of a-f] (q_a) {$\mathbf{q}_\alpha$} ; %
+  \edge[-] {q_a} {a-f} ; %
+  \node[const, left=0.5 of s-f] (q_s) {$\mathbf{q}_\sigma$} ; %
+  \edge[-] {q_s} {s-f} ; %
+  
+  % Operators
+  \node[const, above=0.15 of x] (times) {$\times$} ; %
+  \node[const, right=1.00 of b] (plus) {$+$} ; %
+  
+  
+  % Plates
+  \plate {yx} { %
+    (y)(y-f)(y-f-caption) %
+    (x)(x)(y-f-caption) %
+  } {$\forall t \in 1, 2, \dots, T$} ;
+\end{tikzpicture}
+```
+
+## Breakout Rooms
+
+Use R to draw $S = 10000$ times (using `replicate`) from the prior predictive distribution of the 
+Hibbs model with reasonable GLD priors, which require
+```{r, message = FALSE}
+rstan::expose_stan_functions(file.path("..", "Week2", "quantile_functions.stan")) # GLD_icdf
+source(file.path("..", "Week2", "GLD_helpers.R")) # GLD_solver and GLD_solver_bounded
+ROOT <- "https://raw.githubusercontent.com/avehtari/ROS-Examples/master/"
+hibbs <- readr::read_delim(paste0(ROOT, "ElectionsEconomy/data/hibbs.dat"), delim = " ")
+hibbs$growth <- hibbs$growth - mean(hibbs$growth) # centering
+y_ <- t(replicate(10000, {
+  # fill in this part
+}))
+```
+
+## Answer: Hyperparameters of GLD Priors
+
+```{r, include = !params$class}
+a_s_alpha <- GLD_solver_bounded(bounds = c(0, 100), median = 52, IQR = 4)
+a_s_beta <- GLD_solver(lower_quartile = -2, median = 0, upper_quartile = 3,
+                       other_quantile = 6.5, alpha = 0.9)
+a_s_sigma <- GLD_solver(lower_quartile = 2.5, median = 4, upper_quartile = 6, 
+                        other_quantile = 0, alpha = 0)
+```
+
+## Answer: Prior Predictive Distribution
+
+```{r, include = !params$class}
+vote_ <- t(replicate(10000, {
+  alpha_ <- GLD_icdf(runif(1), median = 52, IQR = 4,
+                    asymmetry = a_s_alpha[1], steepness = a_s_alpha[2])
+  beta_ <- GLD_rng(median = 0, IQR = 3 - -2, # same as passing runif(1) to GLD_icdf
+                   asymmetry = a_s_beta[1], steepness = a_s_beta[2])
+  mu_ <- alpha_ + beta_ * hibbs$growth
+  sigma_ <- GLD_rng(median = 4, IQR = 6 - 2.5,
+                    asymmetry = a_s_sigma[1], steepness = a_s_sigma[2])
+  epsilon_ <- rnorm(n = length(mu_), mean = 0, sd = sigma_)
+  y_ <- mu_ + epsilon_ # y_ has a normal distribution with expectation mu_
+  y_
+}))
+colnames(vote_) <- hibbs$year
+```
+
+## Checking the Prior Predictive Distribution {.smaller}
+
+```{r, include = !params$class}
+summary(vote_) # a little too wide
+```
+
+
+## Tthe `stan_glm` Function in the rstanarm Package
+
+```{r, results = "hide"}
+options(mc.cores = parallel::detectCores()) # use all the cores on your computer
+post <- stan_glm(inc.party.vote ~ growth, data = hibbs, family = gaussian,
+                 prior_intercept = normal(location = 52, scale = 2, autoscale = FALSE), 
+                 prior = normal(location = 2.5, scale = 1, autoscale = FALSE),
+                 prior_aux = exponential(rate = 0.25, autoscale = FALSE)) # expectation of 4
+```
+```{r, output.lines = -(1:5)}
+post
+```
+
+## Plotting the Marginal Posterior Densities
+
+```{r}
+plot(post, plotfun = "areas_ridges", pars = c("growth", "sigma")) # exclude the intercept
+```
+
+## Credible Intervals and $R^2$
+
+```{r}
+round(posterior_interval(post, prob = 0.8), digits = 2)
+summary(bayes_R2(post))
+```
+
+## Sampling Distribution of OLS vs. Posterior Kernel {.build}
+
+<div class="columns-2">
+```{r, echo = FALSE, comment = ""}
+cat(readLines("OLS_rng.stan"), sep = "\n")
+```
+<div class="blue2">
+```{r, echo = FALSE, comment = ""}
+cat(readLines("lm_kernel.stan"), sep = "\n")
+```
+</div>
+</div>
+
+## Normal Distribution of the True Test Statistic
+
+```{r, fig.height=2.5, fig.width=10, small.mar = TRUE, message = FALSE}
+rstan::expose_stan_functions("OLS_rng.stan"); x <- lfactorial(0:16); alpha <- 0
+beta <- 0.5; sigma <- 10; OLS <- OLS_rng(S = 10 ^ 5, alpha, beta, sigma, x); colMeans(OLS)
+se <- sqrt(sigma ^ 2 / sum( (x - mean(x)) ^ 2 )) # true standard error of estimated slope
+plot(ecdf((OLS[ , 2] - beta) / se), main = "", xlab = "", ylab = "CDF of Test Statistic")
+curve(pnorm(z), from = -5, to = 5, lty = 2, col = 2, add = TRUE, xname = "z")
+legend("topleft", legend = c("Simulated", "Phi"), col = 1:2, lty = 1:2, bg = "lightgrey")
+```
+
+## Student t Distribution of Estimated Test Statistic
+
+```{r, fig.height = 4, fig.width = 10, small.mar = TRUE}
+se_hat <- sqrt(OLS[ , 3] / sum( (x - mean(x)) ^ 2 )) # estimated standard error of estimate
+plot(ecdf((OLS[ , 2] - beta) / se_hat), main = "", xlab = "", ylab =  "CDF of Test Statistic")
+curve(pt(z, df = 17 - 2), from = -5, to = 5, lty = 2, col = 2, add = TRUE, xname = "z")
+curve(pnorm(z), from = -5, to = 5, lty = 3, col = 3, add = TRUE, xname = "z")
+legend("topleft", legend = c("Simulated", "True", "Phi"), col = 1:3, lty = 1:3, bg = "grey")
+```
+
+## Power of the Test that $\beta = 0$ against $\beta > 0$
+
+```{r}
+round(x, digits = 4)
+mean( (OLS[ , 2] - 0) / se_hat > qt(0.95, df = 17 - 2) )
+```
+In other words, for THESE $17$ values of $x$, we EXPECT (over $Y$) to reject the false null 
+hypothesis that $\beta = 0$ in favor of the alternative hypothesis that $\beta > 0$ at the 5% 
+level with probability $0.624$ when the true value of $\beta$ is $\frac{1}{2}$.
+
+>- What good is this PRE-DATA (on $y_1, y_2, \dots, y_{17}$) statement?
+>- But in this case the posterior distribution is the same as the estimated sampling
+  distribution of the OLS estimator across datasets
+
+## Breakout Rooms: IQ of Three Year Olds {.build}
+
+* All examples from the reading (plus more) are available at
+  https://github.com/avehtari/RAOS-Examples
+* At 36 months, kids were given an IQ test
+* Suppose the conditional expectation is a linear function of whether its mother
+  graduated high school and the IQ of the mother
+* In breakout rooms, draw from the prior predictive distribution of the outcome
+  using independent normal priors on the intercept and coefficients and
+  an exponential prior on $\sigma$
+```{r}
+data(kidiq, package = "rstanarm")
+colnames(kidiq) # remember to center
+```
+
+## Answer
+
+```{r}
+kid_score <- with(kidiq, t(replicate(10000, {
+  alpha_ <- rnorm(1, mean = 100, sd = 15)
+  beta_hs_ <- rnorm(1, mean = 0, sd = 2.5)
+  beta_iq_ <- rnorm(1, mean = 0, sd = 2.5)
+  mu_ <- alpha_ + beta_hs_ * (mom_hs - mean(mom_hs)) + beta_iq_ * (mom_iq - mean(mom_iq))
+  
+  sigma_ <- rexp(1, rate = 1 / 15)
+  epsilon_ <- rnorm(n = length(mu_), mean = 0, sd = sigma_)
+  mu_ + epsilon_
+})))
+summary(kid_score[ , 1]) # predictive distribution for first 3 year old (too wide)
+```
+
+## Answer (in class)
+
+```{r, results="hide", include = !params$class}
+priors <- stan_glm(kid_score ~ mom_hs + I(mom_iq / 10), data = kidiq, family = gaussian(),
+                   prior_intercept = normal(location = 100, scale = 15, autoscale = FALSE), 
+                   prior = normal(autoscale = FALSE), QR = TRUE,
+                   prior_aux = exponential(rate = 1 / 15, autoscale = FALSE), prior_PD = TRUE)
+```
+```{r}
+prior_PD <- posterior_predict(priors)
+dim(prior_PD); plot(priors, regex_pars = "^[^(Intercept)]") # exclude intercept
+```
+
+## What Does `QR = TRUE` Do?
+
+- Let the vector of linear predictions in a GLM be $\boldsymbol{\eta} = \mathbf{X} \boldsymbol{\beta}$
+- If we apply the QR decomposition to the linear predictor, 
+  $$\boldsymbol{\eta} = \overbrace{\mathbf{Q}\mathbf{R}}^\mathbf{X} \boldsymbol{\beta} = 
+  \mathbf{Q} \overbrace{\boldsymbol{\theta}}^{\mathbf{R}\boldsymbol{\beta}}$$
+- When you specify `QR = TRUE` in `stan_glm` (or use `stan_lm` or `stan_polr`), **rstanarm** internally does a
+  GLM using $\mathbf{Q}$ as the matrix of predictors instead of $\mathbf{X}$ to get the posterior distribution
+  of $\boldsymbol{\theta}$ and then pre-multiplies each posterior draw of $\boldsymbol{\theta}$ by $\mathbf{R}^{-1}$
+  to get a posterior draw of $\boldsymbol{\beta} = \mathbf{R}^{-1}\boldsymbol{\theta}$
+- Doing so makes it easier for NUTS to sample from the posterior distribution (of $\boldsymbol{\theta}$) efficiently
+  because the columns of $\mathbf{Q}$ are orthogonal, whereas the columns of $\mathbf{X}$ are not
+
+## Drawing from the Posterior Distribution
+
+```{r, results = "hide"}
+post <- update(priors, prior_PD = FALSE)
+```
+```{r, output.lines = -(1:13)}
+summary(post)
+```
+
+## Posterior vs. Prior
+
+```{r, message = FALSE}
+posterior_vs_prior(post, prob = 0.5, regex_pars = "^[^(]") # excludes (Intercept)
+```
+
+## ShinyStan
+
+- ShinyStan can be launched on an object produced by rstanarm via
+```{r, eval = FALSE, include = TRUE}
+launch_shinystan(post)
+```
+- A webapp will open in your default web browser that helps you visualize
+ the posterior distribution and diagnose problems
+
+## Plot at the Posterior Median Estimates
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, fig.height = 5.5, fig.width = 10}
+b <- coef(post); intercepts <- c(b[1], sum(b[1:2])); slopes <- c(b[3], sum(b[3:4]));
+library(ggplot2)
+ggplot(kidiq, aes(mom_iq, kid_score)) + geom_point(aes(color = as.factor(mom_hs)), show.legend = FALSE) +
+  geom_abline(intercept = intercepts, slope = slopes, color = c("gray", "black")) +
+  scale_color_manual(values = c("gray", "black")) + 
+  labs(x = "Mother IQ score", y = "Child test score")
+```
+
+## Correct Plot
+
+```{r, message = FALSE, fig.height = 5, fig.width = 10}
+pp_check(post, plotfun = "loo_intervals", order = "median")
+```
+
+## Utility Function for Predictions of Future Data
+
+- For Bayesians, the log predictive PDF is the most appropriate utility function
+- Choose the model that maximizes the expectation of this over FUTURE data
+$$\mbox{ELPD} = \mathbb{E}_Y \ln f\left(y_{N + 1}, y_{N + 2}, \dots, y_{2N} \mid y_1, y_2, \dots, y_N\right) = \\
+  \ln \int_{-\infty}^\infty \cdots \int_{-\infty}^\infty \int_{-\infty}^\infty 
+  f\left(y_{N + 1}, y_{N + 2}, \dots, y_{2N} \mid \mathbf{y}\right) 
+  dy_{N + 1} dy_{N + 2} \dots dy_{2N} \approx  \\
+  \sum_{n = 1}^N \ln f\left(y_n \mid \mathbf{y}_{-n}\right) = \sum_{n = 1}^N
+  \ln \int_\Theta f\left(y_n \mid \boldsymbol{\theta}\right) 
+  f\left(\boldsymbol{\theta} \mid \mathbf{y}_{-n}\right) d\theta_1 d\theta_2 \dots d\theta_K$$
+  
+> - $f\left(y_n \mid \boldsymbol{\theta}\right)$ is just the $n$-th likelihood contribution,
+  but can we somehow obtain $f\left(\boldsymbol{\theta} \mid \mathbf{y}_{-n}\right)$ from 
+  $f\left(\boldsymbol{\theta} \mid \mathbf{y}\right)$?
+> - Yes, assuming $y_n$ does not have an outsized influence on the posterior  
+
+## Pareto Smoothed Importance Sampling
+
+- Let $r_n^s = \frac{1}{f\left(y_n \mid \widehat{\boldsymbol{\theta}}^s\right)} \propto
+  \frac{f\left(\widehat{\boldsymbol{\theta}^s} \mid \mathbf{y}_{-n}\right)}
+  {f\left(\widehat{\boldsymbol{\theta}^s} \mid \mathbf{y}\right)}$ 
+  be the $s$-th importance ratio for $y_n$
+- Fit a generalized Pareto model to these importance ratios, which have PDF
+$$f\left(r_n \mid \mu, \sigma, k\right) = 
+\frac{1}{\sigma}\left(1 + \frac{k\left(\mu - r_n\right)}{\sigma}\right)^{-1 - \frac{1}{k}}$$
+- In the 20% right tail, use an interpolated $\widehat{r}_n^s$ rather than $r_n^s$
+- Doing so stabilizes the variances as long as the estimated shape parameters
+  of the generalized Pareto distribution are not too large
+    
+    - $\widehat{k}_n < 0.5$ is good and $\widehat{k}_n \in \left[0.5, 0.7\right]$ is okay
+    - $\widehat{k}_n > 0.7$ is bad and $\widehat{k}_n > 1.0$ is very bad
+
+## PSISLOOCV with the Kid IQ Example
+
+```{r}
+loo(post)
+```
+
+## Model with Interaction Term
+
+```{r, results = "hide"}
+interaction <- update(post, formula. = . ~ . + mom_hs:mom_iq)
+```
+```{r, warning = FALSE}
+compare_models(flat = loo(post), interaction = loo(interaction))
+```
+
+## Data on Diamonds {.build}
+
+```{r, message = FALSE}
+data("diamonds", package = "ggplot2")
+diamonds <- diamonds[diamonds$z > 0, ] # probably mistakes in the data
+str(diamonds)
+```
+
+> - What do you think is the prior $R^2$ for a model of `log(price)`?
+
+## Do This Once on Each Computer You Use
+
+- R comes with a terrible default coding for ordered factors in regressions known
+  as "Helmert" contrasts
+- Execute this once to change them to "treatment" contrasts, which is the conventional
+  coding in the social sciences with dummy variables relative to a baseline category
+```{r, eval = FALSE}
+cat('options(contrasts = c(unordered = "contr.treatment", ordered = "contr.treatment"))',
+    file = "~/.Rprofile", sep = "\n", append = TRUE)
+```
+- Without this, you will get a weird rotation of the coefficients on the `cut` and
+  `clarity` dummy variables
+- `"contr.sum"` is another reasonable (but rare) choice
+
+## The `stan_lm` Function  {.smaller}
+
+```{r, diamonds, results = "hide", cache = TRUE, message = FALSE, warning = FALSE}
+post <- stan_lm(log(price) ~ carat * (log(x) + log(y) + log(z)) + cut + color + clarity,
+                data = diamonds, prior = R2(location = 0.8, what = "mode"), adapt_delta = 0.9)
+```
+<div class="columns-2">
+```{r}
+str(as.data.frame(post), vec.len = 3, digits.d = 2)
+```
+</div>
+
+## Typical Output
+
+<div class="columns-2">
+```{r, output.lines = -(1:7)}
+print(post, digits = 4)
+```
+</div>
+
+## What Is the Effect of an Increase in Carat? {.build}
+
+```{r, delta, cache = TRUE, fig.height = 4, fig.width = 10, small.mar = TRUE, warning = FALSE}
+mu_0 <- exp(posterior_linpred(post, draws = 500)) / 1000
+df <- diamonds[diamonds$z > 0, ]; df$carat <- df$carat + 0.2
+mu_1 <- exp(posterior_linpred(post, newdata = df, draws = 500)) / 1000
+plot(density(mu_1 - mu_0), xlab = expression(mu[1] - mu[0]), xlim = c(.3, 10), log = "x", main = "")
+```
+
+## But Wait
+
+```{r, loo_plot, cache = TRUE, warning = FALSE, fig.height = 5.5, fig.width=10}
+plot(loo(post), label_points = TRUE)
+```
+
+## Why NUTS Is Better than Other MCMC Samplers
+
+* With Stan, it is almost always the case that things either go well or you get
+  warning messages saying things did not go well
+* Because Stan uses gradients, it scales well as models get more complex
+* The first-order autocorrelation tends to be negative so you can get greater
+  effective sample sizes (for mean estimates) than nominal sample size
+```{r}
+round(bayesplot::neff_ratio(post), digits = 2)
+```
+
+## Divergent Transitions
+
+* NUTS only uses first derivatives
+* First order approximations to Hamiltonian physiscs are fine for if either the second derivatives
+  are constant or the discrete step size is sufficiently small
+* When the second derviatives are very not constant across $\Theta$, Stan can (easily) mis-tune
+  to a step size that is not sufficiently small and $\theta_k$ gets pushed to $\pm \infty$
+* When this happens there will be a warning message, suggesting to increase `adapt_delta`
+* When `adapt_delta` is closer to 1, Stan will tend to take smaller steps
+* Unfortunately, even as `adapt_delta` $\lim 1$, there may be no sufficiently small
+  step size and you need to try to reparameterize your model
+
+## Exceeding Maximum Treedepth
+
+* When the step size is small, NUTS needs many (small) steps to cross the "typical"
+  subset of $\Theta$ and hit the U-turn point
+* Sometimes, NUTS has not U-turned when it reaches its limit of 10 steps (by default)
+* When this happens there will be a warning message, suggesting to increase `max_treedepth`
+* There is always a sufficiently high value of `max_treedepth` to allow NUTS to
+  reach the U-turn point, but increasing `max_treedepth` by 1 approximately doubles
+  the wall time to obtain $S$ draws
+
+## Low Bayesian Fraction of Missing Information
+
+* When the tails of the posterior PDF are very light, NUTS can have difficulty moving
+  through $\Theta$ efficiently
+* This will manifest itself in a low (and possibly unreliable) estimate of $n_{eff}$  
+* When this happens there will be a warning message, saying that the Bayesian Fraction
+  of Missing Information (BFMI) is low
+* In this situation, there is not much you can do except increase $S$ or preferably 
+  reparameterize your model to make it easier for NUTS
+
+## Runtime Exceptions
+
+* Sometimes you will get a "informational" (not error, not warning) message saying
+  that some parameter that should be positive is zero or some parameter that should
+  be finite is infinite
+* This means that a 64bit computer could not represent the number accurately
+* If it only happens a few times and only during the warmup phase, do not worry
+* Otherwise, you might try to use functions that are more numerically stable, which
+  is discussed throughout the Stan User Manual 

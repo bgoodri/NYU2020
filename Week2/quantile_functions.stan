@@ -181,7 +181,7 @@ functions {
         n = 1;
         zeta = L;
       } else { // LHm2B = 0 -> removable discontinuity
-        return u * Phi(B + 0.5 * HmL / c * inv_Phi(p));
+        return l + uml * Phi(B + 0.5 * HmL / c * inv_Phi(p));
       }
       return l + uml * Phi(zeta + lambda * sinh(delta * (inv_Phi(p) + n * c)));
     }

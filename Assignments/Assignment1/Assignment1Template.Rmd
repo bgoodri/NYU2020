@@ -1,0 +1,75 @@
+---
+title: "APSTA-GE 2123 Assignment 4"
+author: "Your Name"
+output: 
+  pdf_document: 
+    number_sections: yes
+---
+
+# Oregon Medicaid Experiment
+
+<!-- This is a chunk of R code -->
+
+```{r}
+J <- 50000 # number of households
+dataset <- data.frame(household_ID = as.factor(unlist(lapply(1:J, FUN = function(j) {
+  rep(j, each = sample(1:3, size = 1, prob = c(0.5, 0.3, 0.2)))
+}))))
+selection <- rbinom(nrow(dataset), size = 1, prob = 0.2)
+dataset$lottery <- ave(selection, dataset$household_ID, FUN = any)
+dataset$numhh <- as.factor(ave(dataset$lottery, dataset$household_ID, FUN = length))
+```
+
+## Actual Prior Predictive Distribution
+
+```{r}
+# fill in this chunk
+```
+
+
+## Prior Predictive Distribution for a Journal
+
+```{r}
+# fill in this chunk
+```
+
+
+# $2018$ American Community Survey
+
+```{r, message = FALSE}
+dataset <- readr::read_csv(dir(pattern = "csv$"))
+dataset <- dataset[ , !startsWith(colnames(dataset), prefix = "PWG")]
+dataset <- dataset[ , !startsWith(colnames(dataset), prefix = "F")]
+dataset <- dataset[!is.na(dataset$WAGP) & dataset$WAGP > 0, ]
+```
+
+## Posterior Distribution
+
+```{r, WAGP, cache = TRUE, results = "hide"}
+# call stan_lm here
+```
+
+```{r}
+# analyze the results here
+```
+
+
+## Influential Observations
+
+```{r}
+# make plot
+```
+
+## Posterior Predictions
+
+```{r}
+# make histogram
+```
+
+
+## Topcoding
+
+```{r}
+topcoded_value <- max(dataset$WAGP)
+# do the analysis
+```

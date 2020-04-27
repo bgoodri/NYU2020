@@ -1,7 +1,6 @@
 # assumes you have already done rstan::expose_stan_functions("quantile_functions.stan")
 GLD_solver <- function(lower_quartile, median, upper_quartile, 
                        other_quantile, alpha, check = TRUE) {
-  if (!exists("GLD_icdf")) stop('call rstan::expose_stan_functions("quantile_functions.stan")')
   obj_xi <- function(xi) {   # chi will be local
     GLD_icdf(alpha, median, IQR = upper_quartile - lower_quartile, chi, xi) - other_quantile
   }
@@ -16,15 +15,13 @@ GLD_solver <- function(lower_quartile, median, upper_quartile,
   names(chi) <- NULL
   old_chi <- 2
   while (abs(chi - old_chi) > 1e-8) {
-    xi <- suppressWarnings(try(uniroot(obj_xi, lower = 1e-2, upper = 1 - 1e-2)$root, 
-                               silent = TRUE))
+    xi <- try(uniroot(obj_xi, lower = 1e-2, upper = 1 - 1e-2)$root, silent = TRUE)
     if (!is.numeric(xi)) {
       if (check) stop("no GLD is possible with these quantiles")
       return(c(asymmetry = NA_real_, steepness = NA_real_))
     }
     old_chi <- chi
-    chi <- suppressWarnings(try(uniroot(obj_chi, lower = -1 + 1e-6, upper = 1 - 1e-6)$root,
-                                silent = TRUE))
+    chi <- try(uniroot(obj_chi, lower = -1 + 1e-6, upper = 1 - 1e-6)$root, silent = TRUE)
     if (!is.numeric(chi)) {
       if (check) stop("no GLD is possible with these quantiles")
       return(c(asymmetry = NA_real_, steepness = NA_real_))
@@ -43,8 +40,30 @@ GLD_solver <- function(lower_quartile, median, upper_quartile,
   return(a_s)
 }
 
+GLD_solver_LBFGS <- function(lower_quartile, median, upper_quartile,
+                             other_quantile, alpha, check = TRUE) {
+  theta <- c(asymmetry = 0, steepness = 0.5)
+  IQR <- upper_quartile - lower_quartile
+  skewness <- (upper_quartile + lower_quartile - 2 * median) / IQR
+  fn <- function(theta) {
+    S_75 <- S_(0.75, theta[1], theta[2])
+    S_25 <- S_(0.25, theta[1], theta[2])
+    r <- c((GLD_icdf(alpha, median, IQR, theta[1], theta[2]) - other_quantile) / IQR, 
+           (S_75 + S_25 - 2 * S_(0.5, theta[1], theta[2]) ) / (S_75 - S_25) - skewness)
+    if (any(!is.finite(r))) return(.Machine$double.xmax)
+    return(crossprod(r)[1])
+  }
+  buffer <- .001
+  opt <- optim(theta, fn = fn, method = "L-BFGS-B", 
+               lower = c(-1, 0) + buffer, upper = c(1, 1) - buffer, 
+               control = list(trace = 10 * check))
+  if (check && opt$convergence != 0) 
+    warning(opt$message,
+            "\nno GLD is exactly possible with these quantiles, so check that the results are decent")
+  return(opt$par)
+}
+  
 GLD_solver_bounded <- function(bounds, median, IQR, check = TRUE, ...) {
-  if (!exists("GLD_icdf")) stop('call rstan::expose_stan_functions("quantile_functions.stan")')
   obj <- function(theta) {
     chi <- theta[1]
     xi  <- theta[2]

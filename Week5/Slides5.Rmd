@@ -1,0 +1,550 @@
+---
+title: "Generalized Linear Models with the brms R Package"
+author: "Ben Goodrich"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+autosize: true
+header-includes:
+   - \usepackage{amsmath}
+   - \usepackage{amssymb}
+   - \usepackage{color}
+output:
+  ioslides_presentation:
+    widescreen: yes
+editor_options: 
+  chunk_output_type: console
+---
+<style type="text/css">
+slides > slide:not(.nobackground):after {
+  content: '';
+}
+</style>
+
+```{r setup, include=FALSE}
+options(width = 90)
+options(mc.cores = parallel::detectCores())
+library(knitr)
+library(knitr)
+hook_output <- knit_hooks$get("output")
+knit_hooks$set(output = function(x, options) {
+  lines <- options$output.lines
+  if (is.null(lines)) {
+    return(hook_output(x, options))  # pass to default hook
+  }
+  x <- unlist(strsplit(x, "\n"))
+  more <- "..."
+  if (length(lines)==1) {        # first n lines
+    if (length(x) > lines) {
+      # truncate the output, but add ....
+      x <- c(head(x, lines), more)
+    }
+  } else {
+    x <- c(more, x[lines], more)
+  }
+  # paste these lines together
+  x <- paste(c(x, ""), collapse = "\n")
+  hook_output(x, options)
+})
+knit_hooks$set(small.mar = function(before, options, envir) {
+    if (before) par(mar = c(4, 4, .1, .1), las = 1)  # smaller margin on top and right
+})
+```
+
+## The **brms** Workflow (Figure 1 in Bürkner 2016)
+
+![The brms workflow](workflow.png)
+
+## The Arguments to `brm`
+
+```{r, message = FALSE}
+library(brms)
+args(brm)
+```
+
+## The `formula` Argument to `brm`
+
+* Everything to the right of the `~` is the same as in many other R functions
+* In many cases, the thing to the left of the `~` is simply the outcome variable
+* However, `brm` introduces a new possibility for this syntax like `y | fun(variable)`,
+  where `fun` could be
+    * `cens()` and `trunc()` to specify known censoring or truncation bounds
+    * `weights()` and `disp()`, which should not be used with MCMC
+    * `se()` to specify "known" standard errors in meta-analyses
+    * `trials()`, which is used in binomial models only
+    * `cat()` to specify the possible categories for ordinal models
+
+## The `family` Argument to `brm`
+
+The `family` argument can be any of the following functions, which also have a 
+link argument that can be a variety of things depending on the family
+```{r, eval = FALSE}
+gaussian; student; binomial; bernoulli; poisson; negbinomial; geometric; Gamma; 
+skew_normal; lognormal; shifted_lognormal; exgaussian; wiener; inverse.gaussian; 
+exponential; weibull; frechet; Beta; dirichlet; von_mises; asym_laplace; 
+gen_extreme_value; categorical; multinomial; cumulative; cratio; sratio; acat; 
+hurdle_poisson; hurdle_negbinomial; hurdle_gamma; hurdle_lognormal; 
+zero_inflated_binomial; zero_inflated_beta; zero_inflated_negbinomial; 
+zero_inflated_poisson; zero_one_inflated_beta
+```
+
+> - The ones involving `hurdle_`, `zero_inflated_` and / or `negbinomial` are
+  of particular interest in the social sciences
+
+## Prior Predictive Distribution for Roach Study {.build}
+
+```{tikz, fig.cap = "Roach Model", fig.ext = 'png', echo = FALSE}
+\usetikzlibrary{bayesnet}
+\begin{tikzpicture}[node distance=2cm, auto,>=latex', thick, scale = 0.07]
+
+  % Define nodes
+
+  % Y
+  \node[obs]          (y)   {roaches}; %
+
+  % Xs
+  \node[obs, left=7 of y] (y1) {lag\_roaches}; %
+  \node[obs, above=0.25 of y1] (T)  {treatment}; %
+  \node[obs, above=1.0 of y, xshift=-3cm] (s) {senior}; %
+  \node[obs, above=1.0 of y, xshift=-1.5cm] (o) {offset}; %
+  
+  % conditional mean function
+  \node[det, right=3 of y1] (n) {$\eta$} ; %
+  \node[det, right=5 of y1] (m) {$\mu$} ; %
+
+  % parameters
+  \node[latent, above=3.4 of n]   (a) {$\alpha$} ; %
+  \node[latent, above=3.0 of y1]  (b1) {$\beta_1$}  ; %
+  \node[latent, right=0.5 of b1]  (b2) {$\beta_2$}  ; %
+  \node[latent, right=0.5 of b2]  (b3) {$\beta_3$}  ; %
+  \node[latent, above=1.0 of y]   (l) {$\lambda$} ; %
+  \node[latent, above=2.5 of l]   (p) {$\phi$} ; %
+  \node[det, below=0.5 of o] (ll) {$\ln \lambda$} ; %
+
+  \edge {l} {ll} ; %
+  \edge {a,b1,b2,b3,y1,T,s,o,ll} {n} ; %
+  \edge {n} {m} ; %
+  \node[const, right=0.4 of n, yshift=-0.25cm] (exp) {$\exp$} ; %
+  
+  % Factors
+  \factor[left=of y] {y-f} {below:$\mathcal{P}$} {m} {y} ; %
+  \factor[above=of a] {a-f} {right:$\mathcal{N}$} {} {a}; %
+  \factor[above=of b1] {b1-f} {left:$\mathcal{N}$} {} {b1} ; %
+  \factor[above=of b2] {b2-f} {right:$\mathcal{N}$} {} {b2} ; %
+  \factor[above=of b3] {b3-f} {left:$\mathcal{N}$} {} {b3} ; %
+  \factor[above=2.0 of l] {l-f} {left:$\mathcal{G}$} {p} {l} ; %
+  \factor[left=1.0 of p] {p-f} {left:$\mathcal{E}$} {} {p} ; %
+
+  % Hyperparameters
+  \node[const, above=0.4 of a-f, xshift=-0.2cm] (m_a) {$m_a$} ; %
+  \node[const, above=0.4 of a-f, xshift=+0.2cm] (s_a) {$s_a$} ; %
+  \edge[-] {m_a,s_a} {a-f} ; %
+  \node[const, above=0.4 of b1-f, xshift=-0.25cm] (m_b1) {$m_{b_1}$} ; %
+  \node[const, above=0.4 of b1-f, xshift=+0.25cm] (s_b1) {$s_{b_1}$} ; %
+  \edge[-] {m_b1,s_b1} {b1-f} ; %
+  \node[const, above=0.4 of b2-f, xshift=-0.25cm] (m_b2) {$m_{b_2}$} ; %
+  \node[const, above=0.4 of b2-f, xshift=+0.25cm] (s_b2) {$s_{b_2}$} ; %
+  \edge[-] {m_b2,s_b2} {b2-f} ; %
+  \node[const, above=0.4 of b3-f, xshift=-0.25cm] (m_b3) {$m_{b_3}$} ; %
+  \node[const, above=0.4 of b3-f, xshift=+0.25cm] (s_b3) {$s_{b_3}$} ; %
+  \edge[-] {m_b3,s_b3} {b3-f} ; %
+  \node[const, above=0.2 of p-f] (r) {$r$} ; %
+  \edge[-] {r} {p-f} ; %
+  
+  % Plates
+  \plate {yx} { %
+    (y)(y-f)(y-f-caption) %
+    (y1)(y-f)(y-f-caption) %
+    (T)(y-f)(y-f-caption) %
+    (s)(y-f)(y-f-caption) %
+  } {$\forall n \in 1, 2, \dots, N$} ;
+\end{tikzpicture}
+```
+
+## Stan Code for this Prior Predictive Distribution
+
+```{stan output.var="roaches_PPD_rng", eval = FALSE}
+functions {
+  matrix roaches_PPD_rng(int S, vector log_roach1, vector treatment,
+                         vector senior, vector offset) {
+    int N = rows(log_roach1);
+    matrix[S, N] PPD;
+    for (s in 1:S) {
+      real alpha = normal_rng(0, 5);
+      real beta[3] = normal_rng([0,0,0], 2);
+      real phi[N] = rep_array(exponential_rng(1), N);
+      real lambda[N] = gamma_rng(phi, phi);
+      vector[N] log_lambda = to_vector(log(lambda));
+      vector[N] eta = alpha + offset + beta[1] * log_roach1 + 
+        beta[2] * treatment + beta[3] * senior + log_lambda;
+      vector[N] mu = exp(eta);
+      PPD[s, ] = to_row_vector(poisson_rng(mu));
+    }
+    return PPD;
+  }
+}
+```
+
+## Breakout Rooms
+
+```{r, message = FALSE}
+data(roaches, package = "rstanarm"); roaches <- roaches[roaches$roach1 > 0, ]; str(roaches)
+```
+
+* Call `rstan::expose_stan_functions` on a .stan file with the
+  previous code
+* Call `roaches_PPD_rng` with `S = 1`, `log_roach1 = log(roaches$roach1)`,
+  and `offset = log(exposure2)`
+* Is this prior predictive distribution of roaches reasonable
+  in the sense that it is similar to `roaches$roach1`?
+* If not, modify the priors in the previous code to make the
+  prior predictive distribution reasonable
+
+## Integral Leading to Negative Binomial
+
+* Now let $\eta_n = \alpha + \sum_{k = 1}^K \beta_k x_{nk}$ without $\log \lambda_n$
+* Poisson likelihood is 
+$\mathcal{L}\left(\eta_n, \lambda_n; y_n\right) \propto \left(\lambda_n e^{\eta_n}\right)^{y_n} e^{-\lambda_n e^{\eta_n}} = \lambda_n^{y_n} \left(e^{\eta_n}\right)^{y_n} e^{-\lambda_n e^{\eta_n}}$
+* Gamma prior is $f\left(\lambda_n \mid \phi\right) \propto \lambda_n^{\phi - 1} e^{-\phi \lambda_n}$
+* Integrating $\lambda_n$ out of the product yields
+$$\int_0^\infty \lambda_n^{y_n} \left(e^{\eta_n}\right)^{y_n} e^{-\lambda_n e^{\eta_n}}
+  \lambda_n^{\phi - 1} e^{-\phi \lambda_n} d\lambda_n \propto \\
+  {y_n + \phi - 1 \choose y_n} \left(\frac{e^{\eta_n}}{e^{\eta_n} + \phi}\right)^{y_n} 
+  \left(\frac{\phi}{e^{\eta_n} + \phi}\right)^\phi$$
+which is the PMF of the negative binomial distribution
+
+## Equivalent Prior Predictive Distribution
+
+```{stan output.var="roaches_PPD_rng", eval = FALSE}
+functions {
+  matrix roaches_PPD_rng(int S, vector log_roach1, vector treatment,
+                         vector senior, vector offset) {
+    int N = rows(log_roach1);
+    matrix[S, N] PPD;
+    for (s in 1:S) {
+      real alpha = normal_rng(0, 5);
+      real beta[3] = normal_rng([0,0,0], 2);
+      real phi = exponential_rng(1);
+      vector[N] eta = alpha + offset + beta[1] * log_roach1 + 
+        beta[2] * treatment + beta[3] * senior;
+      PPD[s, ] = to_row_vector(neg_binomial_2_log_rng(eta, phi));
+    }
+    return PPD;
+  }
+}
+```
+
+## The `prior` Argument to `brm` {.smaller}
+
+```{r}
+args(set_prior) # or just prior()
+```
+
+* `prior` is a character string (in the Stan language) such as `"normal(0,5)"`
+* `class` indicates what parameters the call to `set_prior` pertains to
+* `coef` is the name of the parameter in question
+* `group` is the name of the grouping factor (if applicable)
+* `resp` is the name of the response variable in multivariate models
+* `dpar` is the name of the distribution parameter (if applicable)
+* `nlpar` is the name of the non-linear parameter (if applicable)
+* `lb` is the lower bound of the parameter (default $-\infty$)
+* `ub` is the upper bound of the parameter (default $\infty$)
+* `check` whether priors should be checked for validity
+
+## The `get_prior` Function
+
+* Input the `formula`, `data`, and `family` and get back the possible prior choices (and defaults)
+
+```{r}
+get_prior(y ~ log(roach1) + treatment + senior + offset(log(exposure2)), 
+          data = roaches, family = negbinomial)
+```
+
+## The `class` Argument to `set_prior`
+
+* Refers to a type of parameter in the model 
+* Defaults to `"b"` which refers to (population-level) regression coefficients
+* Other possible values are `"Intercept"`, `"sd"`, `"cor"`, `"sigma"` and others we may talk about
+  later
+```{r}
+my_prior <- prior(cauchy(0, 1), class = "b")
+```
+* If you call `prior` rather than `set_prior`, the first argument can be an R expression rather
+  than a character string
+
+## Example of `brm`
+
+```{r, kidney, cache = TRUE, message = FALSE, results = "hide", warning = FALSE}
+post <- brm(y ~ log(roach1) + treatment + senior + offset(log(exposure2)), 
+            data = roaches, family = negbinomial, prior = prior(normal(0, 2), class = "b") +
+            prior(normal(0, 5), class = "Intercept") + prior(exponential(1), class = "shape"))
+```
+```{r, output.lines = -c(1:8)}
+post
+```
+
+## Using the `loo` Function
+
+* McElreath cautions against using things like `loo` when $\lambda_n$ is included
+* If $\lambda_n$ is integrated out of the posterior distribution by using a 
+  negative binomial likelihood, everything's fine (unless there are warnings, in which
+  case `reloo`)
+```{r, message = FALSE}
+loo_post <- loo(post, reloo = TRUE) # observation 85 has a Pareto k > 0.7
+loo_post
+```
+
+## Using the `pp_check` Function
+
+```{r, message = FALSE}
+pp_check(post, type = "loo_intervals") # type is the same as plotfun with rstanarm
+```
+
+## Using the `hypothesis` Function
+
+* To do this with **rstanarm**, you would have to first call `as.matrix`
+```{r}
+args(brms:::hypothesis.brmsfit)
+```
+* Here `x` is the object produced by `brm` and `hypothesis` is a string, typically with an 
+  embedded `<` or `>`, such as
+```{r}
+hypothesis(post, "treatment < 0")
+```
+  
+## Other Post-Estimation Methods {.smaller}
+
+Many of the things you can do with an object produced by `brm` are analagous to **rstanarm**
+```{r, echo = FALSE}
+matrix(c(gsub("\\.brmsfit$", "", methods(class = "brmsfit")), "", ""), ncol = 3)
+```
+
+## Breakout Rooms: Hurdle Models {.smaller}
+
+* Hurdle models combine a logit model for whether there is a positive number of roaches in a 
+  building with a negative binomial model for the number of roaches, conditional on there being 
+  at least 1 roach
+* Augment previous Stan code to draw from its prior predictive distribution of a hurdle model
+* Hints: You are going to have to loop from `1` to `N` and do the two parts inside an inner
+  loop instead of vectorizing the whole thing. Also, you will need a `while` loop to enforce
+  the constraint that the draw from the negative binomial distribution is not zero.
+```{r}
+get_prior(brms::bf(y ~ log(roach1) + treatment + senior + offset(log(exposure2)),
+                   hu ~ I(roach1 == 0) + treatment + senior), data = roaches,
+          family = hurdle_negbinomial)
+```
+
+## Hurdle Models with `brm`
+
+```{r, post_hurdle, cache = TRUE, results = "hide"}
+post_hurdle <- brm(brms::bf(y ~ log(roach1) + treatment + senior + offset(log(exposure2)),
+                            hu ~ I(roach1 == 0) + treatment + senior), data = roaches,
+                   family = hurdle_negbinomial, seed = 12345, prior = 
+                     prior(normal(0, 2), class = "b") +
+                     prior(normal(0, 5), class = "Intercept") + 
+                     prior(exponential(1), class = "shape") +
+                     prior(normal(0, 2), class = "b", dpar = "hu"))
+```
+
+## Results of Hurdle Model
+
+```{r, output.lines = -(1:8)}
+post_hurdle
+```
+
+## PSISLOOCV Comparison {.smaller}
+
+<div class="columns-2">
+```{r, message = FALSE}
+loo(post, post_hurdle, reloo = TRUE)
+```
+</div>
+
+## Simplexes
+
+- Let $X_1, X_2, \dots X_K$ be defined for a sample space $\Omega$ or a parameter space $\Theta$
+  such that $X_k \geq 0 \forall k$ and $\sum_{k = 1}^K X_k = 1$
+- Then $X_1, X_2, \dots X_K$ are said to be a simplex, which is essentially a PMF
+- The constraint that $\sum_{k = 1}^K X_k = 1$ implies $X_i$ is NOT independent of $X_j$
+- The cumulative sum of a simplex is often useful and implies the last element is exactly
+  $1$ while all the previous elements are between $0$ and $1$
+
+## Dirichlet Distribution
+
+- Dirichlet distribution is a PDF over PMFs that has the following form
+$$\begin{eqnarray*}
+f\left(\left.\boldsymbol{\pi}\right|\boldsymbol{\alpha}\right) & = & \frac{1}{B\left(\boldsymbol{\alpha}\right)}\prod_{k=1}^{K}\pi_{k}^{\alpha_{k}-1}
+\end{eqnarray*}$$
+where $\alpha_{k}\geq0\,\forall k$ and the multivariate Beta
+function is $B\left(\boldsymbol{\alpha}\right)=\frac{\prod_{k=1}^{K}\Gamma\left(\alpha_{k}\right)}{\Gamma\left(\prod_{k=1}^{K}\alpha_{k}\right)}$
+where $\Gamma\left(z\right)=\int_{0}^{\infty}u^{z-1}e^{-u}du$ is
+the Gamma function, which is implemented in R as `gamma` and Stan as `tgamma`
+- $\mathbb{E}\pi_{i}=\frac{\alpha_{i}}{\sum_{k=1}^{K}\alpha_{k}}\,\forall i$
+and the mode of $\pi_{i}$ is $\frac{\alpha_{i}-1}{-1+\sum_{k=1}^{K}\alpha_{k}}$
+if $\alpha_{i}>1$
+- Iff $\alpha_{k}=1\,\forall k$, $f\left(\left.\boldsymbol{\pi}\right|\boldsymbol{\alpha}=\mathbf{1}\right)$
+is constant over $\Theta$ (simplexes)
+- Dirichlet distribution is conjugate with the multinomial and categorical
+
+## Categorical Distribution
+
+* The categorical distribution over $\Omega = \{1,2,\dots,K\}$ has a PMF
+  $\Pr\left(\left.x\right|\pi_1,\pi_2,\dots,\pi_K\right) =
+  \prod_{k=1}^K \pi_k^{\mathbb{I}\left(x=k\right)}$ where the parameters satisfy
+
+    1. $\pi_k \geq 0 \forall k$
+    2. $\sum_{k=1}^K \pi_k = 1$
+
+* The categorical distribution is a generalization of the Bernoulli distribution to the
+  case where there are $K$ categories rather than merely failure vs. success
+* To draw randomly from it, you can do `sample(Omega, size = 1, prob = c(pi_1, pi_2, ..., pi_K))`
+* You can make each $\pi_k$ a function of predictors in a regression model
+
+## Multinomial Distribution
+
+* The multinomial distribution over $\Omega = \{0,1,\dots,n\}$ has a PMF
+  $\Pr\left(\left.x\right|\pi_1,\pi_2,\dots,\pi_K\right) =
+  n!\prod_{k=1}^K \frac{\pi_k^{x_k}}{x_k!}$ where the parameters satisfy
+  $\pi_k \geq 0 \forall k$, $\sum_{k=1}^K \pi_k = 1$, and $n = \sum_{k=1}^K x_k$
+
+* The multinomial distribution is a generalization of the binomial distribution to the case that
+  there are $K$ possibilities rather than merely failure vs. success
+* The multinomial distribution is the count of $n$ independent categorical random variables
+  with the same $\pi_k$ values
+* Can draw from it with `rmultinom(1, size = n, prob = c(pi_1, pi_2, ..., pi_K))`
+* Categorical is a special case where $n = 1$
+
+## Graphs of Standard Normal Utility with Cutpoints
+
+```{r, echo = FALSE, small.mar = TRUE}
+p <- ppoints(1000)
+x <- qnorm(p)
+par(mar = c(4, 4, .1, .1), las = 1, mfcol = 1:2)
+plot(x, dnorm(x), type = "l", xlab = "Utility", ylab = "Density")
+cutpoints <- x[c(100, 200, 400, 700)]
+segments(x0 = cutpoints, y0 = 0, y1 = dnorm(cutpoints), 
+         col = "red", lty = "dashed")
+plot(x, pnorm(x), type = "l", xlab = "Utility", ylab = "Cumulative Density")
+segments(x0 = cutpoints, y0 = 0, y1 = pnorm(cutpoints),
+         col = "red", lty = "dashed")
+segments(x0 = -10, y0 = pnorm(cutpoints), x1 = cutpoints,
+         col = "red", lty = "dashed")
+
+```
+
+## Likelihood for an Ordered Observation
+
+* Likelihood for an observation is just categorical: $\mathcal{L}\left(\beta, \boldsymbol{\zeta};y\right) \propto\prod_{j=1}^{J}\Pr\left(\left.y=j\right|\beta, \boldsymbol{\zeta}\right)$
+* If $F\left(\right)$ is in the location-scale family (normal, logistic,
+etc.), then $F\left(\beta x +\epsilon\leq\zeta_{j}\right)=F_{0,1}\left(\zeta_{j}-\beta x\right)$,
+where $F_{0,1}\left(\right)$ is the "standard" version of the CDF
+* $\Pr\left(\left.y=j\right|\beta, \boldsymbol{\zeta}\right) = 
+   F\left(\beta x +\epsilon\leq\zeta_{j}\right) -
+   F\left(\beta x +\epsilon\leq\zeta_{j - 1}\right)$
+
+## Prior Predictive Distribution of an Ordinal Model
+
+$$\forall k: \beta_k \thicksim ??? \\
+  \forall n: \eta_n = \sum_{k = 1}^K \beta_k x_{nk} \\
+  \zeta_1 \thicksim ??? \\
+  \forall 1 < j < J - 1:\zeta_j - \zeta_{j - 1} \thicksim ??? \\
+  \forall n: \epsilon_n \thicksim \mathcal{N}\left(0,1\right) \\
+  \forall n: u_n = \eta_n + \epsilon_n \\
+  \forall n: y_n = 1 + \sum_{j = 1}^{J - 1} \mathcal{I}\{u_n > \zeta_j\}$$
+
+## Estimating an Ordinal Model with `stan_polr`
+
+```{r, polr, cache = TRUE, results = "hide", message = FALSE, warning = FALSE}
+library(rstanarm); options(mc.cores = parallel::detectCores())
+data("inhaler", package = "brms")
+inhaler$rating <- as.ordered(inhaler$rating)
+post <- stan_polr(rating ~ treat + period + carry, data = inhaler, 
+                  method = "probit", prior = R2(0.25), seed = 12345)
+```
+* Now we can estimate the causal effect of `treat` on utility for `rating`:
+```{r}
+nd <- inhaler; nd$treat <- 1
+y1_star <- posterior_linpred(post, newdata = nd)
+nd$treat <- 0
+y0_star <- posterior_linpred(post, newdata = nd)
+summary(c(y1_star - y0_star))
+```
+
+## Results
+
+```{r, echo = FALSE, output.lines = c(5:16)}
+print(post, digits = 2)
+```
+
+## Similar Models with `brm`
+
+* `brm` can estimate similar models, but with priors on the coefficients
+```{r, brm1, cache = TRUE, results = "hide", message = FALSE, warning = FALSE}
+po <- brm(rating ~ treat + period + carry,
+            data = inhaler, family = cumulative) # similar to rstanarm::stan_polr
+sr <- brm(formula = rating ~ period + carry + cs(treat), data = inhaler,
+            family = sratio, prior = prior(normal(-1, 2), coef = "treat"))
+```
+* Latter model considers when a person "stops" and allows the effect of `treat` to vary across categories
+  of `rating`
+  
+## `loo` to the Rescue {.smaller}
+
+<div class="columns-2">
+```{r}
+loo(po, sr)
+```
+</div>
+
+## Results of Cumulative Model
+
+```{r, output.lines = -c(1:8)}
+po
+```
+
+## Results of Stopping Ratio Model
+```{r, output.lines = -c(1:8)}
+sr
+```
+
+## Models with Ordinal Predictors {.build}
+
+* Often but not always it is reasonable to assume that the coefficients on 
+  dummy variables derived from the same ordered factor are monotonic
+```{r}
+theta <- MCMCpack::rdirichlet(n = 1, alpha = c(1, 1, 1))[1, ] # PDF over PMFs
+rbind(theta, cumsum(theta))
+gamma <- rnorm(n = 1)
+beta <- gamma * cumsum(theta)
+```
+* This is what **brms** does when you use `mo(ordered_factor)` on the
+  right-hand side of a formula and put a standard normal prior on the scale factor
+* For more examples, see
+  https://cran.r-project.org/package=brms/vignettes/brms_monotonic.html
+
+## Ordinal Predictors in Polling
+
+```{r, warning = FALSE, message = FALSE}
+poll <- readRDS("GooglePoll.rds") # WantToWin is coded as 1 for Romney and 0 for Obama
+library(dplyr)
+collapsed <- filter(poll, !is.na(WantToWin)) %>%
+             group_by(Region, Gender, Urban_Density, Age, Income) %>%
+             summarize(Romney = sum(grepl("Romney", WantToWin)), Obama = n() - Romney) %>%
+             na.omit
+```
+```{r, president, cache = TRUE, results = "hide", warning = FALSE, message = FALSE}
+post <- brm(Romney | trials(Romney + Obama) ~ Region + Gender + Urban_Density + 
+              # Age and Income are restricted to have monotonic effects
+              mo(Age) + mo(Income), data = collapsed, family = binomial)
+
+```
+
+## Results of Model with Ordinal Predictors {.smaller}
+
+```{r, output.lines = -c(1:8), echo = FALSE}
+post
+```
+
+## Effects Plot
+
+```{r, message = FALSE}
+plot(conditional_effects(post, effects = "Age"))
+```

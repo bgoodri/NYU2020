@@ -1,0 +1,188 @@
+---
+title: "APSTA-GE 2123 Assignment 2 Answer Key"
+author: "May 4, 2020"
+output: 
+  pdf_document: 
+    number_sections: yes
+urlcolor: red
+editor_options: 
+  chunk_output_type: console
+---
+
+# The Impact of Medicaid Expansion on Voter Participation
+
+```{r, message = FALSE}
+library(brms)
+options(mc.cores = parallel::detectCores())
+library(haven)
+unzip("100.00019026_supp.zip")
+oregon <- as_factor(read_dta(file.path("19026_supp", "Data", "individual_voting_data.dta")))
+oregon <- na.omit(oregon[, c("vote_presidential_2008_1", "numhh_list", "treatment", "prevote",
+                             "english_list", "female_list", "age_list", "zip_hh_inc_list")])
+```
+
+## Priors and Prior Predictive Distribution with brms
+
+First, we can look at the output of `get_prior` to see what all the parameters are referred
+to as, in order to form our own prior distributions over them.
+```{r}
+get_prior(vote_presidential_2008_1 ~ numhh_list + treatment, data = oregon, family = bernoulli)
+priors <- prior(normal(0, 1), class = "b") + 
+  prior(normal(0, 0.1), class = "b", coef = "treatment") +
+  prior(normal(0, 1.5), class = "Intercept")
+```
+Second, we can draw from those priors using the `brm` function with the `sample_prior = "only"`
+argument.
+```{r, prior, cache = TRUE, results = "hide", message = FALSE}
+draws <- brm(vote_presidential_2008_1 ~ numhh_list + treatment, data = oregon,
+             family = bernoulli, prior = priors, sample_prior = "only")
+mu <- pp_expect(draws, nsamples = 2000) 
+```
+These draws from the prior distribution of the conditional expectation are
+pretty uniform across people, which is often a reasonable place to start from.
+```{r, prior_summary, cache = TRUE, dependson=prior}
+summary(apply(mu, MARGIN = 2, FUN = min))
+summary(apply(mu, MARGIN = 2, FUN = max))
+summary(apply(mu, MARGIN = 2, FUN = median))
+summary(apply(mu, MARGIN = 2, FUN = mean))
+summary(apply(mu, MARGIN = 2, FUN = IQR))
+```
+
+## Posterior Distribution
+
+Then, we can condition on the data and draw from the posterior distribution:
+```{r, post, cache = TRUE, results = "hide", message = FALSE, dependson=draws}
+post <- update(draws, sample_prior = "no") 
+```
+```{r}
+post
+hypothesis(post, hypothesis = "treatment > 0")
+```
+Despite our skeptical priors, given the data, the posterior probability that
+the treatment increases voter turnout is 0.96. Note that in the original analysis,
+the authors failed to reject the null hypothesis that the treatment effect is
+zero, although they used a Gausian rather than a Bernoulli likelihood and maximized
+it rather than obtaining a posterior distribution.
+
+For what it is worth, the posterior distribution of the conditional expectation
+for each person is now not close to uniform
+```{r, posterior_summary, cache = TRUE, dependson=post}
+mu <- pp_expect(post, nsamples = 2000)
+summary(apply(mu, MARGIN = 2, FUN = min))
+summary(apply(mu, MARGIN = 2, FUN = max))
+summary(apply(mu, MARGIN = 2, FUN = median))
+summary(apply(mu, MARGIN = 2, FUN = mean))
+summary(apply(mu, MARGIN = 2, FUN = IQR))
+```
+which is not unusual when conditioning on so many observations in a simple model.
+
+## Alternative Model
+
+Nevertheless, the previous model includes none of the predictors that political
+scientists usually utilize to predict voter turnout, such as age and income
+(here of the zip code that the person lives in). I put these in as splines because
+there is little reason to assume that the log-odds are linear functions of them.
+In addition, I include dummy variables for whether the person voted in a previous
+election, speaks English, and is female.
+```{r, alternate, cache = TRUE, results = "hide", message = FALSE}
+oregon$age_list <- oregon$age_list / 10
+oregon$zip_hh_inc_list <- oregon$zip_hh_inc_list / 1000
+alternate <- update(post, formula. = . ~ . + prevote + english_list + female_list + 
+                    s(age_list) + s(zip_hh_inc_list), newdata = oregon)
+```
+I did not do anything to remove the divergent transitions in order to show the
+pairs plot when that happens:
+```{r}
+pairs(alternate$fit, pars = c("sds_sage_list_1", "sds_szip_hh_inc_list_1", "lp__"), las = 1)
+```
+
+but it would be better to have called `brm` with `control = list(adapt_delta = 0.9)`
+or so.
+
+As might be anticipated, this model is expected to predict future data much better
+```{r, loo, cache = TRUE, dependson=post}
+loo_subsample(post, alternate)
+```
+and the estimate of the treatment effect is both still positive.
+```{r}
+alternate
+```
+However, in substantive terms the effect is rather small. For what it is worth,
+which is not much considering these are not the variables of interest, we can
+plot the posterior distribution of the non-linear functions relating age and
+income (in the person's zip code) to the probability of voting.
+```{r}
+conditional_effects(alternate, effects = "age_list")
+conditional_effects(alternate, effects = "zip_hh_inc_list")
+```
+
+# Coronavirus in NYC
+
+```{r, message = FALSE}
+ROOT <- "https://raw.githubusercontent.com/nychealth"
+NYC <- readr::read_csv(paste0(ROOT, "/coronavirus-data/master/case-hosp-death.csv"))
+NYC$day <- 1:nrow(NYC)
+```
+
+## Negative Binomial Model
+
+```{r, nb, cache = TRUE, results = "hide", message = FALSE}
+nb <- brm(CASE_COUNT ~ poly(day, degree = 2), data = NYC, family = negbinomial, 
+          prior = prior(normal( 1,   0.50), class = "b", coef = "polydaydegreeEQ21") +
+                  prior(normal(-0.5, 0.25), class = "b", coef = "polydaydegreeEQ22") +
+                  prior(normal(5, 3), class = "Intercept") + 
+                  prior(exponential(1), class = "shape"))
+```
+
+## Poisson Model
+
+```{r, po, cache = TRUE, results = "hide", message = FALSE}
+po <- update(nb, family = poisson)
+```
+
+## Model Comparison
+
+First, the Poisson model is a special case of the negative binomial model as
+the overdispersion (shape) parameter goes to infinity. Clearly, its posterior
+distribution is small, indicating considerable overdispersion relative to a
+Poisson model
+```{r}
+nb
+```
+
+Second, the Pareto $k$ estimates for the negative binomial model are all fine
+```{r}
+loo(nb)
+```
+whereas that is not true for the Poisson model, indicating that its posterior
+distribution is sensitive to particular observations
+```{r}
+plot(loo(po), label_points = TRUE)
+```
+
+Third, although the negative binomial model seems too simplistic
+```{r}
+pp_check(nb, type = "loo_intervals") + ggplot2::scale_y_continuous(trans = 'log10')
+```
+the Poisson model is way overconfident in its predictions
+```{r}
+pp_check(po, type = "loo_intervals") + ggplot2::scale_y_continuous(trans = 'log10')
+```
+
+## Posterior Prediction
+
+```{r}
+nd <- data.frame(day = (nrow(NYC) + 1):(nrow(NYC) + 7))
+PPD <- posterior_predict(nb, newdata = nd)
+boxplot(PPD, log = "y", pch = ".", ylim = c(100, 30000), las = 1)
+```
+
+The uncertainty is considerable since there is about a 50-50 chance that
+the number of new cases will be between 500 and 3000 each day. However,
+this simple model seems to be reacting too slowly to better data coming
+out of NYC in recent days, since the posterior medians are a bit below
+2000 and hopefully the number of new cases will drop below 200.
+
+It should be pointed out that these "curve fitting" models of the
+coronavirus have not been very good compared to models that incorporate
+epidemiological theory.

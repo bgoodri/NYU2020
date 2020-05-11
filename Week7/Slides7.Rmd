@@ -1,0 +1,641 @@
+---
+title: "Introduction to the Stan Language"
+author: "Ben Goodrich"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+autosize: true
+header-includes:
+   - \usepackage{amsmath}
+   - \usepackage{amssymb}
+   - \usepackage{color}
+output:
+  ioslides_presentation:
+    widescreen: yes
+editor_options: 
+  chunk_output_type: console
+---
+<style type="text/css">
+slides > slide:not(.nobackground):after {
+  content: '';
+}
+</style>
+
+```{r setup, include=FALSE}
+options(width = 90)
+library(knitr)
+knit_hooks$set(small.mar = function(before, options, envir) {
+    if (before) par(mar = c(4, 4, .1, .1), las = 1)  # smaller margin on top and right
+})
+hook_output <- knit_hooks$get("output")
+knit_hooks$set(output = function(x, options) {
+  lines <- options$output.lines
+  if (is.null(lines)) {
+    return(hook_output(x, options))  # pass to default hook
+  }
+  x <- unlist(strsplit(x, "\n"))
+  more <- "..."
+  if (length(lines)==1) {        # first n lines
+    if (length(x) > lines) {
+      # truncate the output, but add ....
+      x <- c(head(x, lines), more)
+    }
+  } else {
+    x <- c(more, x[lines], more)
+  }
+  # paste these lines together
+  x <- paste(c(x, ""), collapse = "\n")
+  hook_output(x, options)
+})
+library(rstan)
+options(mc.cores = 4L)
+rstan_options(auto_write = TRUE)
+```
+
+## Grading / Final Projects
+
+- I have the graded Assignment 1s and Assignment 2 should be graded this afternoon
+- Final Projects due by 11:59 PM on May 19th
+- Can analyze data used in another class
+- If you cannot share the data, let me know
+- Can use rstanarm or brms or write your own Stan code
+- I don't care very much what the previous literature says
+- Go through the process of laying out a generative model, drawing from the prior
+  predictive distribution, conditioning on the observed data (and making
+  sure Stan samples well), looking at posterior predictive plots, comparing it
+  to an alternative model, etc.
+- Should be around ten pages as a PDF
+
+## Workflow for Stan via R
+
+- You write the program in a (text) .stan file with a R-like syntax
+- Stan's parser, `stanc`, does three things:
+    - checks that program is syntactically valid and tells you if not
+    - writes a conceptually equivalent C++ source file to disk
+    - C++ compiler creates a binary file from the C++ source
+- When you have some C++ like `x = mu + sigma * z;`
+    - C++ can automatically store $\frac{\partial x}{\partial\mu}$, $\frac{\partial x}{\partial\sigma}$,
+    and $\frac{\partial x}{\partial z}$ by overloading arithmetic operators and handle the chain-rule for you
+    - Called automatic differentiation (not numerical differentiation)
+    - Unless $\mu$, $\sigma$, or $z$ is constant, in which case it doesn't bother
+- You execute the binary from R (can be concurrent with parsing and compiling)
+- You analyze the resulting samples from the posterior
+
+## Primitive Object Types in Stan
+
+- In Stan / C++, variables must declared with types
+- In Stan / C++, statements are terminated with semi-colons
+- Primitive scalar types: `real x;` or `int K;`
+    - Unknowns cannot be `int` because no derivatives and hence no HMC
+    - Can condition on integer data because no derivatives are needed
+- Implicitly real `vector[K] z;` or `row_vector[K] z;`
+- Implicitly real `matrix[N,K] X;` can have 1 column / row
+- Arrays are just holders of any other homogenous objects
+    - `real x[N]` is similar to `vector[N] x;` but lacks linear algebra functions
+    - `vector[N] X[K];` and `row_vector[K] X[N]` are similar to
+      `matrix[N,K] X;` but lack linear algebra functionality, although
+      they have uses in loops
+- Vectors and matrices cannot store integers,
+  so instead use possibly multidimensional integer arrays `int y[N];` or `int Y[N,P];`
+
+## The `lookup` Function in **rstan**
+
+- Can input the name of an R function, in which case it will try
+to find an analagous Stan function
+- Can input a regular expression, in which case it will find matching
+Stan functions that match
+```{r, size='footnotesize',comment="#", message = FALSE}
+library(rstan)         # functions starting with inv
+lookup("^inv.*[^gf]$") # but not ending with g or f
+```
+
+## Optional `functions` Block of .stan Programs
+
+- Stan permits users to define and use their own functions
+- If used, must be defined in a leading `functions` block
+- Can only validate constraints inside user-defined functions
+- Very useful for several reasons:
+    - Easier to reuse across different .stan programs
+    - Makes subsequent chunks of code more readable
+    - Enables posteriors with Ordinary Differential Equations, algebraic
+      equations, and integrals
+    - Can be exported to R via `expose_stan_functions()`
+- All functions, whether user-defined or build-in, must be called by
+argument position rather than by argument name, and there are no default
+arguments
+- User-defined functions cannot have the same name as existing functions
+or keywords and are case-sensitive
+
+## Constrained Object Declarations in Stan
+
+Outside of the `functions` block, any primitive object can have bounds:
+
+- `int<lower = 1> K;` `real<lower = -1, upper = 1> rho;`
+- `vector<lower = 0>[K] alpha;` and similarly for a `matrix`
+- A `vector` (but not a `row_vector`) can be further specialized:
+    - `unit_vector[K] x;` implies $\sum_{k=1}^{K}x_{k}^{2}=1$
+    - `simplex[K] x;` implies $x_{k}\geq0\,\forall k$ and $\sum_{k=1}^{K}x_{k}=1$
+    - `ordered[K] x;` implies $x_{j}<x_{k}\,\forall j<k$
+    - `positive_ordered[K] x;` implies $0<x_{j}<x_{k}\,\forall j<k$
+- A `matrix` can be specialized to enforce constraints:
+    - `cov_matrix[K] Sigma;` or better `cholesky_factor_cov[K, K] L;`
+    - `corr_matrix[K] Lambda;` or `cholesky_factor_corr[K] C;`
+
+## "Required" `data` Block of .stan Programs
+
+- All knowns passed from R to Stan as a NAMED list, such as
+  outcomes $\left(\mathbf{y}\right)$, covariates $\left(\mathbf{X}\right)$,
+  constants $\left(K\right)$, and / or hyperparameters $\left(\mathbf{a}\right)$
+- Basically, everything posterior distribution conditions on
+- Can have comments in C++ style (`//` or `/* ... */`)
+- Whitespace is essentially irrelevant, except after keywords
+```{stan output.var="data", eval = FALSE}
+data {
+  int<lower = 0> N;     // number of observations
+  int<lower = 0> y[N];  // count outcome
+  
+  real<lower = 0> a;    // shape of gamma prior
+  real<lower = 0> b;    // rate of gamma prior
+}
+```
+
+## "Required" `parameters` Block of .stan Programs
+
+- Declare exogenous unknowns whose posterior distribution is sought
+- Cannot declare any integer parameters currently, only reals
+- Must specify the parameter space but lower and upper
+bounds are implicitly $\pm\infty$ if unspecified
+```{stan output.var="parameter", eval = FALSE}
+parameters {
+  real<lower = 0> mu;   // mean of DGP
+}
+```
+- The change-of-variables adjustment due to the transformation from
+an unconstrained parameter space to the (in this case, positive) constrained space
+is handled automatically and added to `target`
+
+## "Required" `model` Block of .stan Programs
+
+- Can declare endogenous unknowns, assign to them, and use them
+- Constraints cannot be declared / validated and samples not stored
+- The `model` block must define (something proportional to) $\text{target}=\log\left(f\left(\boldsymbol{\theta}\right)\times f\left(\left.\mathbf{y}\right|\boldsymbol{\theta},\cdot\right)\right)=\log f\left(\boldsymbol{\theta}\right)+\log f\left(\left.\mathbf{y}\right|\boldsymbol{\theta},\cdot\right)$
+- There is an internal reserved symbol called `target` that is
+initialized to zero (before change-of-variable adjustments) you increment by `target += ...;`
+- Functions ending `_lpdf` or `_lpmf` return scalars even if some of their arguments are vectors or 
+  one-dimensional arrays, in which case it sums the log density/mass over the presumed conditionally
+  independent elements
+```{stan output.var="mode", eval = FALSE}
+model {
+  target += gamma_lpdf(mu | a, b); // log prior PDF
+  target += poisson_lpmf(y | mu);  // log likelihood
+}
+```
+
+## Entire Stan Program
+
+```{r, comment="", echo = FALSE}
+writeLines(readLines("poisson.stan"))
+```
+
+## Calling `stan` in the **rstan** Package
+
+```{r, results = "hide", message = FALSE, warning = FALSE}
+library(rstan)
+options(mc.cores = parallel::detectCores())
+fit_1 <- stan("poisson.stan",
+              data = list(N = nrow(faithful), y = faithful$waiting,
+                          a = 2, b = 0.03),
+              # below are default values but you could change them
+              control = list(adapt_delta = 0.8, max_treedepth = 10))
+```
+```{r}
+dim(fit_1) # 1000 draws on each of 4 chains for 1 unknown and 1 target
+```
+
+## Posterior Summary
+
+```{r}
+print(fit_1, digits = 2)
+```
+
+## Extracting Posterior Draws
+
+```{r, small.mar = TRUE, fig.width=9, fig.height=3.5}
+mu <- sort(as.data.frame(fit_1)$mu) # or use extract()
+plot(mu, (1:length(mu)) / length(mu), type = "l", ylab = "ECDF")
+lines(mu, pgamma(mu, shape = 2 + sum(faithful$waiting), 
+                     rate = 0.03 + length(faithful$waiting)), col = 2, lty = 2)
+legend("topleft", legend = c("Stan", "Conjugate"), col = 1:2, lty = 1:2, box.lwd = NA)
+```
+
+## Optional `transformed parameters` Block
+
+- Comes after the `parameters` block but before the `model` block
+- Need to declare objects before they are assigned
+- Calculate endogenous unknowns that are deterministic functions of things declared in earlier blocks
+- Used to create interesting intermediate inputs to the log-kernel
+- Declared constraints are validated and samples are stored
+- Often used in multilevel models to define group-specific unknowns
+
+## Stan Does not Care about Conjugacy
+
+```{r, comment="", echo = FALSE}
+writeLines(readLines("poisson_GLD.stan"))
+```
+
+## Posterior from GLD Prior
+
+```{r, GLD, cache = TRUE, message = FALSE, warning = FALSE, results = "hide"}
+expose_stan_functions("quantile_functions.stan")
+source("GLD_helpers.R")
+a_s <- GLD_solver_LBFGS(lower_quartile = 25, median = 60, upper_quartile = 125,
+                        other_quantile = 0, alpha = 0)
+fit_2 <- stan("poisson_GLD.stan",
+              data = list(N = nrow(faithful), y = faithful$waiting, m = 60,
+                          r = 125 - 25, asymmetry = a_s[1], steepness = a_s[2]))
+```
+```{r}
+fit_2
+```
+
+## Breakout Rooms:
+
+- Let $\mu = e^{\eta}$ in the Poisson log-PMF:
+$$y_n \log \mu - \mu + \sum_{k = 2}^{y_n} \log k$$
+- Write a Stan program with a normal prior on $\eta$
+
+## Optional `generated quantities` Block
+
+- Can declare more endogenous knowns, assign to them, and use them
+- Samples are stored
+- Can reference anything except stuff in the `model` block
+- Can also do this in R afterward, but primarily used for
+    - Interesting functions of posterior that don't involve likelihood
+    - Posterior predictive distributions and / or functions thereof
+    - The log-likelihood for each observation to pass to `loo`
+
+## Reparameterizing the Likelihood
+
+```{r, comment="", echo = FALSE}
+writeLines(readLines("poisson_N.stan"))
+```
+
+## Posterior with Inverse Link Function
+
+```{r, inverse_link, cache = TRUE, message = FALSE, warning = FALSE}
+fit_3 <- stan("poisson_N.stan", 
+              data = list(N = nrow(faithful), y = faithful$waiting,
+                          loc = log(60), scal = 5))
+```
+```{r}
+fit_3
+```
+
+## Mixture Model
+
+```{r, comment="", echo = FALSE}
+writeLines(readLines("poisson_mix.stan"))
+```
+
+## Posterior from Mixture Model
+
+```{r, normal, cache = TRUE, message = FALSE, warning = FALSE}
+fit_4 <- stan("poisson_mix.stan", 
+              data = list(N = nrow(faithful), y = faithful$waiting,
+                          loc = log(60), scal = 5))
+```
+```{r, output.lines = 5:11}
+fit_4
+```
+
+> - See also https://mc-stan.org/users/documentation/case-studies/identifying_mixture_models.html
+
+## Pairs Plot
+
+```{r, small.mar = TRUE, warning = FALSE}
+pairs(fit_4)
+```
+
+## Correct Mixture Model
+
+```{r, comment="", echo = FALSE}
+writeLines(readLines("poisson_mix2.stan"))
+```
+
+## Breakout Rooms: Probit Model
+
+- Suppose $y_n$ indicates whether a person is in the labor force
+- Use Bernoulli likelihood in a Stan program with the normal CDF
+  as the inverse link function
+
+```{stan output.var="probit", eval = FALSE}
+data {
+  // all knowns you condition on, including prior stuff
+}
+parameters {
+  // unknowns
+}
+model {
+  // numerator of Bayes Rule in log units
+  // hint: Phi() evaluates the standard normal CDF
+}
+```
+
+## Optional `transformed data` Block
+
+- Is executed only once before the iterations start
+- Comes after the `data` block and used to calculate needed functions
+- Not necessary if calling Stan from R with everything in `data`
+- Can use it to check that data was passed correctly from R
+- Need to declare objects before they can be assigned (=) but can be on the same line
+- All declarations must come directly after the opening `{`
+
+## Using the **brms** Package to Generate Stan Code
+
+- You do not need to start writing with a blank Stan program; you can use the `make_stancode` 
+  function in the *brms* package to look at or modify the code `brm` generaes
+- Also, you can use `make_standata` to generate a named list of R objects that
+  need to be passed to the `data` block of the Stan program
+  
+```{r, message = FALSE}
+library(brms)
+code <- make_stancode(count ~ log(Age) + Trt  + (1 | patient), 
+                      data = epilepsy, family = poisson(),
+                      prior = c(prior(student_t(5, 0, 10), class = b), 
+                                prior(cauchy(0, 2), class = sd)))
+dat <- make_standata(count ~ log(Age) + Trt + (1 | patient), 
+                     data = epilepsy, family = poisson(), 
+                     prior = c(prior(student_t(5, 0, 10), class = b), 
+                               prior(cauchy(0, 2), class = sd)))
+```
+
+## Generated Data List {.smaller}
+
+```{r, echo = FALSE}
+str(dat)
+```
+
+## Generated Stan Code {.smaller}
+
+<div class="columns-2">
+```{r, echo = FALSE, comment = ""}
+code[1] <- sub("// generated with brms 2.12.0\nfunctions {\n}\n", "", code[1], fixed = TRUE)
+code
+```
+</div>
+
+## Data for Hierarchical Model of Bowling
+
+```{r}
+ROOT <- "https://www.cs.rpi.edu/academics/courses/fall14/csci1200/"
+US_Open2010 <- readLines(paste0(ROOT, "hw/02_bowling_classes/2010_US_Open.txt"))
+x1_x2 <- lapply(US_Open2010, FUN = function(x) {
+  pins <- scan(what = integer(), sep = " ", quiet = TRUE,
+               text = sub("^[a-zA-Z_ \']+(.*$)", "\\1", x))
+  results <- matrix(NA_integer_, 10, 2)
+  pos <- 1
+  for (f in 1:10) {
+    x1 <- pins[pos]
+    if (x1 == 10) results[f, ] <- c(x1, 0L)
+    else {
+      pos <- pos + 1
+      x2 <- pins[pos]
+      results[f, ] <- c(x1, x2)
+    }
+    pos <- pos + 1
+  }
+  return(results)
+}) # 30 element list each with a 10x2 integer array of pins knocked down
+```
+
+## Illustrative Data
+
+```{r}
+names(x1_x2) <- sub("^([a-zA-Z_ \']+)( .*$)", "\\1", US_Open2010)
+x1_x2[1]
+```
+
+## Multilevel Stan Program for Bowling
+
+```{r, echo = FALSE, comment = ""}
+writeLines(readLines("bowling_mlm.stan"))
+```
+
+## What Was the `bowling_kernel` Function?
+
+```{r, echo = FALSE, comment = ""}
+writeLines(readLines("bowling_kernel.stan"))
+```
+
+## Multilevel Posterior Distribution
+
+```{r, post_mlm, cache = TRUE, message = FALSE, warning = FALSE, output.lines = 5:18}
+post_mlm <- stan("bowling_mlm.stan", control = list(adapt_delta = 0.85), refresh = 0,
+                 data = list(J = length(x1_x2), x1_x2 = x1_x2, a = 1:11, s = 10))
+print(post_mlm, pars = "pi", include = FALSE, digits = 2)
+```
+
+## Pairs Plot
+
+```{r, out.width="750px", small.mar = TRUE}
+pairs(post_mlm, pars = c("mu", "pi"), include = FALSE)
+```
+
+## Meta-Analysis
+
+- "Meta-analysis" of previous studies is popular in some fields such as
+  education and medicine
+- Can be written as a multi-level model where each study is its own "group"
+  with its own intercept that captures the difference between what each
+  study is estimating and what it wants to estimate
+- Outcome is the point estimate for each Frequentist study
+- Estimated standard error from each Frequentist study is treated as
+  an exogenous known
+
+## Simulation Based Callibration (SBC)
+
+* Talts et al. (2018) [proposes](https://arxiv.org/abs/1804.06788) SBC
+* The posterior distribution conditional on data drawn from the prior
+  predictive distribution cannot be systematically different from the prior
+* Appearances to the contrary are due to failure of the software
+* Provides a way to limit the fourth source of uncertainty by repeatedly
+
+    1. Drawing $\widetilde{\boldsymbol{\theta}}$ the prior of $\boldsymbol{\theta}$
+    2. Drawing from the prior predictive distribution of 
+      $\widetilde{\mathbf{y}} \mid \widetilde{\boldsymbol{\theta}}$
+    3. Drawing from the posterior distribution of $\boldsymbol{\theta} \mid \widehat{\mathbf{y}}$
+    4. Evaluating whether $\boldsymbol{\theta} > \widetilde{\boldsymbol{\theta}}$
+
+* See also this blog 
+  [post](https://statmodeling.stat.columbia.edu/2018/04/18/better-check-yo-self-wreck-yo-self/)
+
+## The `data` and `transformed data` Blocks
+
+```{r, echo = FALSE, comment = ""}
+writeLines(readLines("meta_analysis.stan")[1:15])
+```
+
+> - Other blocks follow on the next slide
+
+## 
+
+```{r, echo = FALSE, comment = ""}
+writeLines(readLines("meta_analysis.stan")[-(1:15)])
+```
+
+## Doing Simulation Based Calibration
+
+```{r, SBC, cache = TRUE, results = "hide", message = FALSE, warning = FALSE}
+sm <- stan_model("meta_analysis.stan")
+data("towels", package = "metaBMA")
+dat <- list(N = nrow(towels), se = towels$SE)
+results <- sbc(sm, data = dat, M = 3000, refresh = 0, control = list(adapt_delta = 0.85))
+```
+```{r}
+results
+```
+
+## SBC Plot
+
+```{r, message = FALSE}
+plot(results) # use to visualize uniformity of order statistics
+```
+
+## Oregon Medicaid Experiment Data
+
+```{r, message = FALSE}
+library(haven); library(dplyr)
+oregon <- as_factor(read_dta("individual_voting_data.dta"))
+(collapsed <- group_by(oregon, t = treatment, s = numhh_list, x = ohp_all_ever_nov2008) %>% 
+              summarize(y = sum(vote_presidential_2008_1), nmy = n() - y)  %>% as.data.frame)
+```
+
+## Oregon Medicaid Experiment in Symbols {.smaller}
+
+Let $s_n \in \{1,2,3\}$ be the number of adults in $n$'s household. Let $t_n$ indicate whether
+any of them wins the Medicaid lottery. Let $x_n$ indicate whether $n$ enrolls in Medicaid
+and $y_n$ indicate whether $n$ votes.
+
+$\begin{eqnarray*}
+\alpha_1 \thicksim GLD\left(\mathbf{q}_\alpha\right) & \qquad & \beta_1 \thicksim GLD\left(\mathbf{q}_\beta\right) \\
+\alpha_2 \thicksim GLD\left(\mathbf{q}_\alpha\right) & \qquad & \beta_2 \thicksim GLD\left(\mathbf{q}_\beta\right) \\
+\alpha_3 \thicksim GLD\left(\mathbf{q}_\alpha\right) & \qquad & \beta_3 \thicksim GLD\left(\mathbf{q}_\beta\right) \\
+\lambda \thicksim GLD\left(\mathbf{q}_\lambda\right) & \qquad & \Delta \thicksim GLD\left(\mathbf{q}_\Delta\right) \\
+                                                     & \qquad & \rho \thicksim GLD\left(\mathbf{q}_\rho\right) \\
+\forall n: \epsilon_n \thicksim \mathcal{N}\left(0,1\right) & \qquad & 
+\forall n: \nu_n \thicksim \mathcal{N}\left(0 + \rho \left(\epsilon_n - 0\right), \sqrt{1 - \rho^2}\right) \\
+\forall n: x_n^\ast = \alpha_{s_n} + \lambda \times t_n + \epsilon_n & \qquad & 
+\forall n: y_n^\ast = \beta_{s_n} + \Delta \times x_n + \nu_n \\
+\forall n: x_n = \mathcal{I}\{x_n^\ast > 0\} & \qquad &
+\forall n: y_n = \mathcal{I}\{y_n^\ast > 0\} \\
+\end{eqnarray*}$
+
+> - If $\rho \neq 0$, $x_n$ is NOT independent of $\nu_n$ so 
+  $\mathbb{E}y_n^\ast \mid s_n, x_n = \beta_{s_n} + \Delta \times x_n + \mathbb{E}\nu_n \mid s_n, x_n$
+> - $\mathbb{E}\left[\nu_n \mid s_n, x_n = 0\right] =
+     \mathbb{E}\left[\nu_n \mid s_n, x_n^\ast < 0\right] =
+     \mathbb{E}\left[\nu_n \mid -\alpha_{s_n} - \lambda \times t_n > \epsilon_n\right] = 
+     \rho \frac{\phi\left(-\alpha_{s_n} - \lambda \times t_n\right)}
+     {\Phi\left(\alpha_{s_n} + \lambda \times T_n\right)}$
+> - $\mathbb{E}\left[\nu_n \mid s_n, x_n = 1\right] =
+     \mathbb{E}\left[\nu_n \mid s_n, x_n^\ast > 0\right] =
+     \mathbb{E}\left[\nu_n \mid -\alpha_{s_n} - \lambda \times t_n < \epsilon_n\right] = 
+     -\rho \frac{\phi\left(-\alpha_{s_n} - \lambda \times t_n\right)}
+     {\Phi\left(-\alpha_{s_n} - \lambda \times T_n\right)}$
+
+## Breakout Rooms
+
+Draw from that prior predictive distribution within the transformed data block
+
+```{stan output.var="PPD", eval = FALSE}
+data {
+  int<lower = 1> N;
+  int<lower = 0, upper = 1> t[N]; // win Medicaid lottery?
+  int<lower = 1, upper = 3> s[N]; // number of adults in household
+  // more stuff
+}
+transformed data {
+  int x[N]; // enrolls in Medicaid?
+  int y[N]; // votes in election?
+  // draw parameters from the prior distributions
+  for (n in 1:N) {
+    // fill in x[n] and y[n]
+  }
+}
+```
+
+## Posterior PDF for Oregon Medicaid Experiment {.smaller}
+
+$\begin{eqnarray*}
+f\left(\boldsymbol{\alpha}, \lambda, \boldsymbol{\beta}, \Delta, \rho \mid 
+  \mathbf{s}, \mathbf{t}, \mathbf{x}, \mathbf{y}\right) 
+  & \propto &
+  f\left(\boldsymbol{\alpha}, \lambda, \boldsymbol{\beta}, \Delta, \rho\right) \times \\
+  \prod_{j = 1}^3 \Pr\left(\epsilon < -\alpha_j \bigcap \nu < -\beta_j \right)^{c_j} & \times & 
+  \prod_{j = 1}^3 \Pr\left(\epsilon < -\alpha_j \bigcap \nu < \beta_j \right)^{c_{j + 3}} \times \\
+  \prod_{j = 1}^3 \Pr\left(\epsilon < \alpha_j \bigcap \nu < -\beta_j - \Delta \right)^{c_{j + 6}} & \times & 
+  \prod_{j = 1}^3 \Pr\left(\epsilon < \alpha_j \bigcap \nu < \beta_j + \Delta \right)^{c_{j + 9}} \times
+  \\
+  \prod_{j = 1}^3 \Pr\left(\epsilon < -\alpha_j - \lambda \bigcap \nu < -\beta_j \right)^{c_{j + 12}} & \times & 
+  \prod_{j = 1}^3 \Pr\left(\epsilon < -\alpha_j - \lambda \bigcap \nu < \beta_j \right)^{c_{j + 15}} \times \\
+  \prod_{j = 1}^3 \Pr\left(\epsilon < \alpha_j  + \lambda \bigcap \nu < -\beta_j - \Delta \right)^{c_{j + 18}} 
+  & \times & 
+  \prod_{j = 1}^3 \Pr\left(\epsilon < \alpha_j  + \lambda \bigcap \nu < \beta_j + \Delta \right)^{c_{j + 21}}
+\end{eqnarray*}$
+
+where $c_i$ indicates the count of people in the $i$-th stratum. 
+You also need a function to evaluate to the bivariate normal CDF.
+
+## Directed Acyclic Graphs (DAGs)
+
+* DAGs are a popular tool for describing a theoretical data-generating process
+
+    * Typically do not depict parameters or distributional assumptions
+    * Most often used to algorithmically conclude whether a causal effect could be 
+      solved for given infinite data
+      
+* Most useful survey paper is [Elwert (2013)](https://link-springer-com.ezproxy.cul.columbia.edu/content/pdf/10.1007%2F978-94-007-6094-3_13.pdf)
+* Most references are to some work of Pearl
+* Most useful website is http://dagitty.net/ which also has an R [package](https://cran.r-project.org/package=dagitty)
+
+## [CausalQueries](https://macartan.github.io/causalmodels/)
+
+* Any DAG with only observed nodes being binary variables can be reprented as a Stan program
+* Primitive parameters are simplex variables of "causal types" like 
+  $\boldsymbol{\lambda}^{\top}=\begin{bmatrix}\lambda_{a} & \lambda_{b} & \lambda_{c} & \lambda_{d}\end{bmatrix}$
+  except in general there are $2^K$ "causal types" where $K$ is the number of parents of a node
+* Likelihood is multinomial with a potentially huge number of categories
+* Can query a model either before or after updating your beliefs about the parameters with
+  data to answer various causal counterfactual questions
+* Computationally difficult and difficult to specify informative priors
+
+## CausalQueries: DAG Specification
+
+```{r, fig.height=4, fig.width=10, message = FALSE}
+library(CausalQueries)
+model <- make_model("t -> x -> y; t <- s -> x; s -> y") %>% 
+  set_confound(confound = list(x = "y[x = 1] == 1"))
+plot(model)
+```
+
+## CausalQueries: Data Compacting
+
+```{r}
+dataset <- transmute(oregon, t = treatment, y = vote_presidential_2008_1,
+                     x = (ohp_all_ever_nov2008 == "Enrolled"),
+                     s = numhh_list != "signed self up")
+```
+<div class="columns-2">
+```{r}
+(compact_data <- collapse_data(dataset, model))
+```
+</div>
+
+## CausalQueries: Drawing from the Posterior
+
+```{r, updating, cache = TRUE, results = "hide", warning=FALSE, message = FALSE}
+post <- update_model(model, dataset, iter = 1000, chains = 2) # can pass other arguments
+result <- query_model(post, using = "posteriors", queries = list(ATE = "c(y[x=1] - y[x=0])"),
+                      given = list(TRUE, "x[t=1] > x[t=0]",  "x==0",  "x==1"))
+```
+```{r}
+result
+```
